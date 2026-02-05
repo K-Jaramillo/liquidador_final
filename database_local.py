@@ -486,6 +486,9 @@ def init_database():
             folio INTEGER NOT NULL,
             cliente TEXT,
             subtotal REAL DEFAULT 0,
+            valor_credito REAL DEFAULT 0,
+            abono REAL DEFAULT 0,
+            estado TEXT DEFAULT 'PENDIENTE',
             repartidor TEXT,
             observaciones TEXT,
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -494,6 +497,49 @@ def init_database():
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_creditos_punteados_fecha ON creditos_punteados(fecha)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_creditos_punteados_folio ON creditos_punteados(folio)')
+    
+    # Agregar columnas si no existen (migración)
+    try:
+        cursor.execute('ALTER TABLE creditos_punteados ADD COLUMN valor_credito REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_punteados ADD COLUMN abono REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_punteados ADD COLUMN estado TEXT DEFAULT "PENDIENTE"')
+    except: pass
+    
+    # ══════════════════════════════════════════════════════════════════
+    # TABLA: CREDITOS_ELEVENTA
+    # Cache de facturas a crédito del sistema Eleventa (Firebird)
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS creditos_eleventa (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT NOT NULL,
+            folio INTEGER NOT NULL,
+            ticket_id INTEGER,
+            cliente TEXT,
+            subtotal REAL DEFAULT 0,
+            total_credito REAL DEFAULT 0,
+            abono REAL DEFAULT 0,
+            estado TEXT DEFAULT 'PENDIENTE',
+            repartidor TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(fecha, folio)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_creditos_eleventa_fecha ON creditos_eleventa(fecha)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_creditos_eleventa_folio ON creditos_eleventa(folio)')
+    
+    # Agregar columnas si no existen (migración)
+    try:
+        cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN abono REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN estado TEXT DEFAULT "PENDIENTE"')
+    except: pass
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: CORTE_CAJERO
@@ -572,6 +618,60 @@ def init_database():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_totales_canc_efectivo_fecha ON totales_cancelaciones_efectivo(fecha)')
+    
+    # ══════════════════════════════════════════════════════════════════
+    # TABLA: ANOTACIONES (Sticky Notes)
+    # Guarda las notas adhesivas con soporte para checklists y adjuntos
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS anotaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            titulo TEXT,
+            contenido TEXT,
+            color TEXT DEFAULT '#FFEB3B',
+            es_checklist INTEGER DEFAULT 0,
+            pos_x INTEGER DEFAULT 0,
+            pos_y INTEGER DEFAULT 0,
+            ancho INTEGER DEFAULT 220,
+            alto INTEGER DEFAULT 180,
+            archivada INTEGER DEFAULT 0,
+            eliminada INTEGER DEFAULT 0,
+            prioridad INTEGER DEFAULT 0,
+            attachments TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_anotaciones_fecha ON anotaciones(fecha)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_anotaciones_archivada ON anotaciones(archivada)')
+    
+    # ══════════════════════════════════════════════════════════════════
+    # TABLA: HISTORIAL_ABONOS
+    # Registra cada abono realizado a un crédito (punteado o eleventa)
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS historial_abonos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha_abono DATE NOT NULL,
+            folio INTEGER NOT NULL,
+            origen TEXT NOT NULL,
+            cliente TEXT,
+            valor_credito REAL DEFAULT 0,
+            abono_anterior REAL DEFAULT 0,
+            nuevo_abono REAL DEFAULT 0,
+            monto_abonado REAL DEFAULT 0,
+            saldo_anterior REAL DEFAULT 0,
+            saldo_nuevo REAL DEFAULT 0,
+            estado_anterior TEXT,
+            estado_nuevo TEXT,
+            observacion TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_fecha ON historial_abonos(fecha_abono)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_folio ON historial_abonos(folio)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_origen ON historial_abonos(origen)')
     
     conn.commit()
     conn.close()
@@ -2056,6 +2156,29 @@ def obtener_creditos_punteados_fecha(fecha: str) -> List[Dict]:
     return [dict(row) for row in rows]
 
 
+def obtener_todos_creditos_punteados() -> List[Dict]:
+    """Obtiene TODOS los créditos punteados de todas las fechas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM creditos_punteados
+        ORDER BY fecha DESC, folio
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_fechas_creditos_punteados() -> List[str]:
+    """Obtiene lista de fechas únicas con créditos punteados."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT DISTINCT fecha FROM creditos_punteados ORDER BY fecha DESC')
+    rows = cursor.fetchall()
+    conn.close()
+    return [row['fecha'] for row in rows]
+
+
 def es_credito_punteado(fecha: str, folio: int) -> bool:
     """Verifica si una factura está marcada como crédito punteado."""
     conn = get_connection()
@@ -2088,6 +2211,571 @@ def obtener_total_creditos_punteados_por_folios(fecha: str, folios: list) -> flo
     total = cursor.fetchone()[0]
     conn.close()
     return total or 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA CRÉDITOS ELEVENTA (Cache de Firebird)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def guardar_credito_eleventa(fecha: str, folio: int, ticket_id: int, cliente: str,
+                              subtotal: float, total_credito: float, repartidor: str = '') -> bool:
+    """Guarda o actualiza un crédito de Eleventa en cache."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO creditos_eleventa (fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fecha, folio) DO UPDATE SET
+                ticket_id = excluded.ticket_id,
+                cliente = excluded.cliente,
+                subtotal = excluded.subtotal,
+                total_credito = excluded.total_credito,
+                repartidor = excluded.repartidor,
+                fecha_modificacion = CURRENT_TIMESTAMP
+        ''', (fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error guardando crédito Eleventa: {e}")
+        return False
+
+
+def guardar_creditos_eleventa_bulk(fecha: str, creditos: List[Dict]) -> int:
+    """Guarda múltiples créditos de Eleventa. Retorna cantidad guardada.
+    IMPORTANTE: Preserva abono y estado existentes."""
+    if not creditos:
+        return 0
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Insertar o actualizar (preservando abono y estado)
+        count = 0
+        for c in creditos:
+            cursor.execute('''
+                INSERT INTO creditos_eleventa (fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fecha, folio) DO UPDATE SET
+                    ticket_id = excluded.ticket_id,
+                    cliente = excluded.cliente,
+                    subtotal = excluded.subtotal,
+                    total_credito = excluded.total_credito,
+                    repartidor = excluded.repartidor,
+                    fecha_modificacion = CURRENT_TIMESTAMP
+            ''', (
+                fecha,
+                c.get('folio', 0),
+                c.get('id', 0),
+                c.get('nombre', ''),
+                c.get('subtotal', 0),
+                c.get('total_credito', 0),
+                c.get('repartidor', '')
+            ))
+            count += 1
+        
+        conn.commit()
+        conn.close()
+        return count
+    except Exception as e:
+        print(f"Error guardando créditos Eleventa en bulk: {e}")
+        return 0
+
+
+def obtener_creditos_eleventa_fecha(fecha: str) -> List[Dict]:
+    """Obtiene todos los créditos Eleventa de una fecha."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor,
+               fecha_creacion, fecha_modificacion
+        FROM creditos_eleventa 
+        WHERE fecha = ?
+        ORDER BY folio
+    ''', (fecha,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_todos_creditos_eleventa() -> List[Dict]:
+    """Obtiene TODOS los créditos Eleventa de todas las fechas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor,
+               abono, estado, fecha_creacion, fecha_modificacion
+        FROM creditos_eleventa
+        ORDER BY fecha DESC, folio
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_fechas_creditos_eleventa() -> List[str]:
+    """Obtiene lista de fechas únicas con créditos Eleventa."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT DISTINCT fecha FROM creditos_eleventa ORDER BY fecha DESC')
+    rows = cursor.fetchall()
+    conn.close()
+    return [row['fecha'] for row in rows]
+
+
+def obtener_total_creditos_eleventa(fecha: str) -> float:
+    """Obtiene el total de créditos Eleventa de una fecha."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COALESCE(SUM(total_credito), 0) FROM creditos_eleventa WHERE fecha = ?', (fecha,))
+    total = cursor.fetchone()[0]
+    conn.close()
+    return total or 0.0
+
+
+def eliminar_creditos_eleventa_fecha(fecha: str) -> bool:
+    """Elimina todos los créditos Eleventa de una fecha."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM creditos_eleventa WHERE fecha = ?', (fecha,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error eliminando créditos Eleventa: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA ACTUALIZAR ABONO Y ESTADO DE CRÉDITOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def registrar_historial_abono(fecha_abono: str, folio: int, origen: str, cliente: str,
+                               valor_credito: float, abono_anterior: float, nuevo_abono: float,
+                               estado_anterior: str, estado_nuevo: str, observacion: str = None) -> bool:
+    """Registra un abono en el historial."""
+    try:
+        monto_abonado = nuevo_abono - abono_anterior
+        saldo_anterior = valor_credito - abono_anterior
+        saldo_nuevo = valor_credito - nuevo_abono
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO historial_abonos 
+            (fecha_abono, folio, origen, cliente, valor_credito, abono_anterior, nuevo_abono,
+             monto_abonado, saldo_anterior, saldo_nuevo, estado_anterior, estado_nuevo, observacion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (fecha_abono, folio, origen, cliente, valor_credito, abono_anterior, nuevo_abono,
+              monto_abonado, saldo_anterior, saldo_nuevo, estado_anterior, estado_nuevo, observacion))
+        conn.commit()
+        conn.close()
+        print(f"📝 Historial: Folio {folio} | Abonó: ${monto_abonado:,.2f} | Saldo: ${saldo_nuevo:,.2f}")
+        return True
+    except Exception as e:
+        print(f"Error registrando historial abono: {e}")
+        return False
+
+
+def obtener_historial_abonos(folio: int = None, origen: str = None) -> list:
+    """Obtiene el historial de abonos, opcionalmente filtrado por folio u origen."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        sql = "SELECT * FROM historial_abonos WHERE 1=1"
+        params = []
+        
+        if folio:
+            sql += " AND folio = ?"
+            params.append(folio)
+        if origen:
+            sql += " AND origen = ?"
+            params.append(origen)
+        
+        sql += " ORDER BY fecha_creacion DESC"
+        
+        cursor.execute(sql, params)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [dict(zip(columns, row)) for row in rows]
+    except Exception as e:
+        print(f"Error obteniendo historial abonos: {e}")
+        return []
+
+
+def actualizar_abono_credito_punteado(fecha: str, folio: int, nuevo_abono: float) -> dict:
+    """Actualiza el abono de un crédito punteado, registra historial y cambia estado si saldo=0."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Obtener datos actuales del crédito
+        cursor.execute('''
+            SELECT cliente, subtotal, valor_credito, abono, estado 
+            FROM creditos_punteados 
+            WHERE fecha = ? AND folio = ?
+        ''', (fecha, folio))
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            return {'success': False, 'error': 'Crédito no encontrado'}
+        
+        cliente, subtotal, valor_credito_db, abono_anterior, estado_anterior = row
+        valor_credito = valor_credito_db or subtotal or 0
+        abono_anterior = abono_anterior or 0
+        estado_anterior = estado_anterior or 'PENDIENTE'
+        
+        # Calcular nuevo saldo
+        nuevo_saldo = valor_credito - nuevo_abono
+        
+        # Determinar nuevo estado
+        if nuevo_saldo <= 0:
+            nuevo_estado = 'PAGADO'
+        else:
+            nuevo_estado = estado_anterior if estado_anterior != 'PAGADO' else 'PENDIENTE'
+        
+        # Actualizar crédito
+        cursor.execute('''
+            UPDATE creditos_punteados 
+            SET abono = ?, estado = ?
+            WHERE fecha = ? AND folio = ?
+        ''', (nuevo_abono, nuevo_estado, fecha, folio))
+        conn.commit()
+        conn.close()
+        
+        # Registrar en historial
+        from datetime import date
+        registrar_historial_abono(
+            fecha_abono=date.today().isoformat(),
+            folio=folio,
+            origen='PUNTEADO',
+            cliente=cliente or '',
+            valor_credito=valor_credito,
+            abono_anterior=abono_anterior,
+            nuevo_abono=nuevo_abono,
+            estado_anterior=estado_anterior,
+            estado_nuevo=nuevo_estado,
+            observacion=f"Abono actualizado - Fecha crédito: {fecha}"
+        )
+        
+        return {
+            'success': True,
+            'valor_credito': valor_credito,
+            'abono_anterior': abono_anterior,
+            'nuevo_abono': nuevo_abono,
+            'saldo_anterior': valor_credito - abono_anterior,
+            'nuevo_saldo': nuevo_saldo,
+            'estado_anterior': estado_anterior,
+            'nuevo_estado': nuevo_estado,
+            'cambio_estado': estado_anterior != nuevo_estado
+        }
+    except Exception as e:
+        print(f"Error actualizando abono crédito punteado: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def actualizar_estado_credito_punteado(fecha: str, folio: int, estado: str) -> bool:
+    """Actualiza el estado de un crédito punteado (PAGADO/PENDIENTE/CANCELADO)."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE creditos_punteados 
+            SET estado = ?
+            WHERE fecha = ? AND folio = ?
+        ''', (estado, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando estado crédito punteado: {e}")
+        return False
+
+
+def actualizar_abono_credito_eleventa(fecha: str, folio: int, nuevo_abono: float) -> dict:
+    """Actualiza el abono de un crédito Eleventa, registra historial y cambia estado si saldo=0."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        print(f"[DEBUG] Buscando crédito Eleventa: fecha={fecha}, folio={folio}")
+        
+        # Obtener datos actuales del crédito
+        cursor.execute('''
+            SELECT cliente, subtotal, total_credito, abono, estado 
+            FROM creditos_eleventa 
+            WHERE fecha = ? AND folio = ?
+        ''', (fecha, folio))
+        row = cursor.fetchone()
+        
+        if not row:
+            # Intentar buscar solo por folio
+            cursor.execute('SELECT fecha, folio FROM creditos_eleventa WHERE folio = ?', (folio,))
+            alt_rows = cursor.fetchall()
+            print(f"[DEBUG] Crédito no encontrado con fecha={fecha}. Folios {folio} encontrados en fechas: {[r['fecha'] for r in alt_rows]}")
+            conn.close()
+            return {'success': False, 'error': f'Crédito no encontrado para fecha={fecha}, folio={folio}'}
+        
+        cliente, subtotal, total_credito, abono_anterior, estado_anterior = row
+        valor_credito = total_credito or subtotal or 0
+        abono_anterior = abono_anterior or 0
+        estado_anterior = estado_anterior or 'PENDIENTE'
+        
+        print(f"[DEBUG] Datos actuales: valor_credito={valor_credito}, abono_anterior={abono_anterior}, estado={estado_anterior}")
+        
+        # Calcular nuevo saldo
+        nuevo_saldo = valor_credito - nuevo_abono
+        
+        # Determinar nuevo estado
+        if nuevo_saldo <= 0:
+            nuevo_estado = 'PAGADO'
+        else:
+            nuevo_estado = estado_anterior if estado_anterior != 'PAGADO' else 'PENDIENTE'
+        
+        # Actualizar crédito
+        cursor.execute('''
+            UPDATE creditos_eleventa 
+            SET abono = ?, estado = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE fecha = ? AND folio = ?
+        ''', (nuevo_abono, nuevo_estado, fecha, folio))
+        
+        rows_affected = cursor.rowcount
+        print(f"[DEBUG] UPDATE ejecutado. Filas afectadas: {rows_affected}")
+        
+        conn.commit()
+        conn.close()
+        
+        if rows_affected == 0:
+            return {'success': False, 'error': 'No se actualizó ningún registro'}
+        
+        # Registrar en historial
+        from datetime import date
+        registrar_historial_abono(
+            fecha_abono=date.today().isoformat(),
+            folio=folio,
+            origen='ELEVENTA',
+            cliente=cliente or '',
+            valor_credito=valor_credito,
+            abono_anterior=abono_anterior,
+            nuevo_abono=nuevo_abono,
+            estado_anterior=estado_anterior,
+            estado_nuevo=nuevo_estado,
+            observacion=f"Abono actualizado - Fecha crédito: {fecha}"
+        )
+        
+        return {
+            'success': True,
+            'valor_credito': valor_credito,
+            'abono_anterior': abono_anterior,
+            'nuevo_abono': nuevo_abono,
+            'saldo_anterior': valor_credito - abono_anterior,
+            'nuevo_saldo': nuevo_saldo,
+            'estado_anterior': estado_anterior,
+            'nuevo_estado': nuevo_estado,
+            'cambio_estado': estado_anterior != nuevo_estado
+        }
+    except Exception as e:
+        print(f"Error actualizando abono crédito Eleventa: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def actualizar_estado_credito_eleventa(fecha: str, folio: int, estado: str) -> bool:
+    """Actualiza el estado de un crédito Eleventa (PAGADO/PENDIENTE/CANCELADO)."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE creditos_eleventa 
+            SET estado = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE fecha = ? AND folio = ?
+        ''', (estado, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando estado crédito Eleventa: {e}")
+        return False
+
+
+def obtener_creditos_punteados_por_estado(estado: str = None) -> List[Dict]:
+    """Obtiene créditos punteados filtrados por estado. Si estado=None, trae todos."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if estado:
+        cursor.execute('SELECT * FROM creditos_punteados WHERE estado = ? ORDER BY fecha DESC, folio', (estado,))
+    else:
+        cursor.execute('SELECT * FROM creditos_punteados ORDER BY fecha DESC, folio')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_creditos_eleventa_por_estado(estado: str = None) -> List[Dict]:
+    """Obtiene créditos Eleventa filtrados por estado. Si estado=None, trae todos."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if estado:
+        cursor.execute('SELECT * FROM creditos_eleventa WHERE estado = ? ORDER BY fecha DESC, folio', (estado,))
+    else:
+        cursor.execute('SELECT * FROM creditos_eleventa ORDER BY fecha DESC, folio')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def saldar_creditos_anteriores_a_fecha(fecha_limite: str = '2026-01-01') -> dict:
+    """
+    Salda automáticamente todos los créditos con fecha anterior a fecha_limite.
+    Pone abono = valor_credito y estado = PAGADO.
+    Registra cada cambio en el historial.
+    
+    Args:
+        fecha_limite: Fecha límite en formato 'YYYY-MM-DD'. Por defecto '2026-01-01'
+    
+    Returns:
+        dict con: eleventa_count, punteados_count, total_saldado
+    """
+    from datetime import date
+    
+    resultado = {
+        'eleventa_count': 0,
+        'punteados_count': 0,
+        'total_saldado_eleventa': 0,
+        'total_saldado_punteados': 0,
+        'errores': []
+    }
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # ═══════════════════════════════════════════════════════════════
+        # SALDAR CRÉDITOS ELEVENTA ANTERIORES A LA FECHA LÍMITE
+        # ═══════════════════════════════════════════════════════════════
+        cursor.execute('''
+            SELECT fecha, folio, cliente, subtotal, total_credito, abono, estado
+            FROM creditos_eleventa
+            WHERE fecha < ? AND (estado IS NULL OR estado != 'PAGADO')
+        ''', (fecha_limite,))
+        creditos_elev = cursor.fetchall()
+        
+        for c in creditos_elev:
+            fecha, folio, cliente, subtotal, total_credito, abono_ant, estado_ant = c
+            valor_credito = total_credito or subtotal or 0
+            abono_anterior = abono_ant or 0
+            estado_anterior = estado_ant or 'PENDIENTE'
+            
+            if valor_credito <= 0:
+                continue
+            
+            # Actualizar: abono = valor_credito, estado = PAGADO
+            cursor.execute('''
+                UPDATE creditos_eleventa
+                SET abono = ?, estado = 'PAGADO', fecha_modificacion = CURRENT_TIMESTAMP
+                WHERE fecha = ? AND folio = ?
+            ''', (valor_credito, fecha, folio))
+            
+            # Registrar en historial
+            monto_abonado = valor_credito - abono_anterior
+            cursor.execute('''
+                INSERT INTO historial_abonos 
+                (fecha_abono, folio, origen, cliente, valor_credito, abono_anterior, nuevo_abono,
+                 monto_abonado, saldo_anterior, saldo_nuevo, estado_anterior, estado_nuevo, observacion)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                date.today().isoformat(),
+                folio,
+                'ELEVENTA',
+                cliente or '',
+                valor_credito,
+                abono_anterior,
+                valor_credito,  # nuevo_abono = valor_credito (saldado)
+                monto_abonado,
+                valor_credito - abono_anterior,  # saldo_anterior
+                0,  # saldo_nuevo = 0 (saldado)
+                estado_anterior,
+                'PAGADO',
+                f'Saldado automáticamente - Crédito anterior a {fecha_limite}'
+            ))
+            
+            resultado['eleventa_count'] += 1
+            resultado['total_saldado_eleventa'] += valor_credito
+        
+        # ═══════════════════════════════════════════════════════════════
+        # SALDAR CRÉDITOS PUNTEADOS ANTERIORES A LA FECHA LÍMITE
+        # ═══════════════════════════════════════════════════════════════
+        cursor.execute('''
+            SELECT fecha, folio, cliente, subtotal, valor_credito, abono, estado
+            FROM creditos_punteados
+            WHERE fecha < ? AND (estado IS NULL OR estado != 'PAGADO')
+        ''', (fecha_limite,))
+        creditos_punt = cursor.fetchall()
+        
+        for c in creditos_punt:
+            fecha, folio, cliente, subtotal, valor_credito_db, abono_ant, estado_ant = c
+            valor_credito = valor_credito_db or subtotal or 0
+            abono_anterior = abono_ant or 0
+            estado_anterior = estado_ant or 'PENDIENTE'
+            
+            if valor_credito <= 0:
+                continue
+            
+            # Actualizar: abono = valor_credito, estado = PAGADO
+            cursor.execute('''
+                UPDATE creditos_punteados
+                SET abono = ?, estado = 'PAGADO'
+                WHERE fecha = ? AND folio = ?
+            ''', (valor_credito, fecha, folio))
+            
+            # Registrar en historial
+            monto_abonado = valor_credito - abono_anterior
+            cursor.execute('''
+                INSERT INTO historial_abonos 
+                (fecha_abono, folio, origen, cliente, valor_credito, abono_anterior, nuevo_abono,
+                 monto_abonado, saldo_anterior, saldo_nuevo, estado_anterior, estado_nuevo, observacion)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                date.today().isoformat(),
+                folio,
+                'PUNTEADO',
+                cliente or '',
+                valor_credito,
+                abono_anterior,
+                valor_credito,  # nuevo_abono = valor_credito (saldado)
+                monto_abonado,
+                valor_credito - abono_anterior,  # saldo_anterior
+                0,  # saldo_nuevo = 0 (saldado)
+                estado_anterior,
+                'PAGADO',
+                f'Saldado automáticamente - Crédito anterior a {fecha_limite}'
+            ))
+            
+            resultado['punteados_count'] += 1
+            resultado['total_saldado_punteados'] += valor_credito
+        
+        conn.commit()
+        conn.close()
+        
+        total_creditos = resultado['eleventa_count'] + resultado['punteados_count']
+        total_monto = resultado['total_saldado_eleventa'] + resultado['total_saldado_punteados']
+        print(f"✅ Saldados {total_creditos} créditos anteriores a {fecha_limite}")
+        print(f"   - Eleventa: {resultado['eleventa_count']} créditos (${resultado['total_saldado_eleventa']:,.2f})")
+        print(f"   - Punteados: {resultado['punteados_count']} créditos (${resultado['total_saldado_punteados']:,.2f})")
+        print(f"   - Total: ${total_monto:,.2f}")
+        
+        return resultado
+        
+    except Exception as e:
+        print(f"Error saldando créditos anteriores: {e}")
+        resultado['errores'].append(str(e))
+        return resultado
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2470,6 +3158,174 @@ def obtener_ultimo_corte_cajero() -> Optional[Dict[str, Any]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA ANOTACIONES (Sticky Notes)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def agregar_anotacion(fecha: str, titulo: str = '', contenido: str = '', color: str = '#FFEB3B',
+                      es_checklist: bool = False, pos_x: int = 0, pos_y: int = 0,
+                      ancho: int = 220, alto: int = 180, prioridad: int = 0,
+                      attachments: List[str] = None) -> int:
+    """Agrega una nueva anotación. Retorna el ID del registro creado."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    attachments_json = json.dumps(attachments) if attachments else '[]'
+    cursor.execute('''
+        INSERT INTO anotaciones (fecha, titulo, contenido, color, es_checklist, 
+                                 pos_x, pos_y, ancho, alto, prioridad, attachments)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (fecha, titulo, contenido, color, 1 if es_checklist else 0, 
+          pos_x, pos_y, ancho, alto, prioridad, attachments_json))
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def obtener_anotaciones(incluir_archivadas: bool = False, fecha: str = None, 
+                        incluir_eliminadas: bool = False) -> List[Dict[str, Any]]:
+    """
+    Obtiene las anotaciones según filtros.
+    
+    Args:
+        incluir_archivadas: Si True, incluye anotaciones archivadas
+        fecha: Filtra por fecha específica (YYYY-MM-DD). Si None, retorna todas.
+        incluir_eliminadas: Si True, incluye anotaciones eliminadas
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    conditions = []
+    params = []
+    
+    if not incluir_eliminadas:
+        conditions.append("eliminada = 0")
+    
+    if not incluir_archivadas:
+        conditions.append("archivada = 0")
+    
+    if fecha:
+        conditions.append("fecha = ?")
+        params.append(fecha)
+    
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    
+    cursor.execute(f'''
+        SELECT id, fecha, titulo, contenido, color, es_checklist, 
+               pos_x, pos_y, ancho, alto, archivada, eliminada, prioridad,
+               attachments, fecha_creacion, fecha_modificacion
+        FROM anotaciones 
+        WHERE {where_clause}
+        ORDER BY prioridad DESC, fecha_creacion DESC
+    ''', params)
+    
+    rows = cursor.fetchall()
+    conn.close()
+    
+    result = []
+    for row in rows:
+        nota = dict(row)
+        # Parsear attachments de JSON a lista
+        try:
+            nota['attachments'] = json.loads(nota['attachments']) if nota['attachments'] else []
+        except (json.JSONDecodeError, TypeError):
+            nota['attachments'] = []
+        nota['es_checklist'] = bool(nota['es_checklist'])
+        nota['archivada'] = bool(nota['archivada'])
+        nota['eliminada'] = bool(nota['eliminada'])
+        result.append(nota)
+    
+    return result
+
+
+def actualizar_anotacion(nota_id: int, **kwargs) -> bool:
+    """
+    Actualiza una anotación existente.
+    
+    Args:
+        nota_id: ID de la anotación a actualizar
+        **kwargs: Campos a actualizar (titulo, contenido, color, pos_x, pos_y, 
+                  ancho, alto, archivada, eliminada, prioridad, attachments)
+    """
+    if not kwargs:
+        return False
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Construir SET clause dinámicamente
+        campos = []
+        valores = []
+        
+        for campo, valor in kwargs.items():
+            if campo == 'attachments':
+                # Convertir lista a JSON
+                valor = json.dumps(valor) if isinstance(valor, list) else valor
+            elif campo in ('es_checklist', 'archivada', 'eliminada'):
+                # Convertir bool a int
+                valor = 1 if valor else 0
+            campos.append(f"{campo} = ?")
+            valores.append(valor)
+        
+        # Agregar fecha_modificacion
+        campos.append("fecha_modificacion = CURRENT_TIMESTAMP")
+        
+        valores.append(nota_id)
+        
+        cursor.execute(f'''
+            UPDATE anotaciones 
+            SET {", ".join(campos)}
+            WHERE id = ?
+        ''', valores)
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando anotación: {e}")
+        return False
+
+
+def eliminar_anotacion(nota_id: int, permanente: bool = False) -> bool:
+    """
+    Elimina una anotación.
+    
+    Args:
+        nota_id: ID de la anotación
+        permanente: Si True, elimina de la BD. Si False, solo marca como eliminada.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        if permanente:
+            cursor.execute('DELETE FROM anotaciones WHERE id = ?', (nota_id,))
+        else:
+            cursor.execute('''
+                UPDATE anotaciones 
+                SET eliminada = 1, fecha_modificacion = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (nota_id,))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error eliminando anotación: {e}")
+        return False
+
+
+def archivar_anotacion(nota_id: int, archivar: bool = True) -> bool:
+    """Archiva o desarchivar una anotación."""
+    return actualizar_anotacion(nota_id, archivada=archivar)
+
+
+def restaurar_anotacion(nota_id: int) -> bool:
+    """Restaura una anotación eliminada."""
+    return actualizar_anotacion(nota_id, eliminada=False)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # INICIALIZACIÓN AUTOMÁTICA
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2488,8 +3344,9 @@ else:
     required_tables = {'asignaciones', 'descuentos', 'gastos', 'conteo_dinero', 
                        'configuracion', 'repartidores', 'historial_liquidaciones',
                        'pago_proveedores', 'prestamos', 'devoluciones_parciales',
-                       'conceptos_gastos', 'creditos_punteados', 'pago_nomina', 'pago_socios',
-                       'transferencias', 'corte_cajero', 'conteos_sesion', 'conteos_sesion_detalle'}
+                       'conceptos_gastos', 'creditos_punteados', 'creditos_eleventa', 'pago_nomina', 'pago_socios',
+                       'transferencias', 'corte_cajero', 'conteos_sesion', 'conteos_sesion_detalle',
+                       'anotaciones'}
     
     if not required_tables.issubset(tables):
         init_database()
