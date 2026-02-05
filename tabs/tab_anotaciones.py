@@ -27,7 +27,7 @@ except Exception:
 
 # Intentar soporte de Pillow para pegar imagen desde portapapeles
 try:
-    from PIL import ImageGrab, Image
+    from PIL import ImageGrab, Image, ImageTk
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -47,8 +47,8 @@ class TabAnotaciones:
     """
     
     # Configuración de distribución de notas
-    NOTA_ANCHO = 220
-    NOTA_ALTO = 180
+    NOTA_ANCHO = 240
+    NOTA_ALTO = 260  # Altura amplia para mostrar adjuntos
     MARGEN_X = 20
     MARGEN_Y = 20
     COLUMNAS_MAX = 6
@@ -119,7 +119,7 @@ class TabAnotaciones:
 
             # Actualizar DB: obtener lista actual y anexar
             fecha = self._fecha_actual()
-            notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+            notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
             nota = next((n for n in notas if n['id'] == nota_id), None)
             attachments = nota.get('attachments') or [] if nota else []
             attachments.append(rel_path)
@@ -171,7 +171,7 @@ class TabAnotaciones:
             # Actualizar DB
             if HAS_DB:
                 fecha = self._fecha_actual()
-                notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+                notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
                 nota = next((n for n in notas if n['id'] == nota_id), None)
                 if nota:
                     attachments = nota.get('attachments') or []
@@ -185,6 +185,100 @@ class TabAnotaciones:
         except Exception as e:
             messagebox.showerror('Error', f'Error pegando imagen: {e}')
             return None
+    
+    def _pegar_imagen_global(self, event=None):
+        """Pega imagen del portapapeles en la primera nota visible o pregunta dónde."""
+        if not HAS_PIL:
+            return None
+        
+        try:
+            img = ImageGrab.grabclipboard()
+            if img is None:
+                return None  # No hay imagen en portapapeles
+            
+            # Buscar notas disponibles
+            if not self.notas_widgets:
+                messagebox.showwarning('Sin notas', 'Crea una nota primero para pegar la imagen')
+                return 'break'
+            
+            # Si hay una sola nota, usar esa
+            if len(self.notas_widgets) == 1:
+                nota_id = list(self.notas_widgets.values())[0]['nota_id']
+                return self._handle_paste(event, nota_id)
+            
+            # Si hay múltiples notas, mostrar diálogo para elegir
+            self._mostrar_selector_nota_para_pegar(img)
+            return 'break'
+            
+        except Exception as e:
+            print(f"[DEBUG] Error en pegar global: {e}")
+            return None
+    
+    def _mostrar_selector_nota_para_pegar(self, img):
+        """Muestra un diálogo para elegir en qué nota pegar la imagen."""
+        if not HAS_DB:
+            return
+        
+        fecha = self._fecha_actual()
+        notas = db_local.obtener_anotaciones(incluir_archivadas=False, fecha=fecha)
+        
+        if not notas:
+            messagebox.showwarning('Sin notas', 'No hay notas activas')
+            return
+        
+        dialog = tk.Toplevel(self.parent)
+        dialog.title("📋 ¿En qué nota pegar la imagen?")
+        dialog.transient(self.parent)
+        dialog.grab_set()
+        dialog.geometry("350x300")
+        dialog.resizable(False, False)
+        
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="Selecciona la nota:", 
+                  font=("Segoe UI", 11, "bold")).pack(pady=(0, 10))
+        
+        # Listbox con las notas
+        listbox = tk.Listbox(frame, font=("Segoe UI", 10), height=10)
+        listbox.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        for nota in notas:
+            titulo = nota.get('titulo', 'Sin título')[:30]
+            attachments = nota.get('attachments') or []
+            icon = "📷" if attachments else "📝"
+            listbox.insert(tk.END, f"{icon} {titulo}")
+        
+        if notas:
+            listbox.selection_set(0)
+        
+        def pegar_en_nota():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            nota = notas[sel[0]]
+            dialog.destroy()
+            self._handle_paste(None, nota['id'])
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side=tk.LEFT)
+        
+        btn_pegar = tk.Button(btn_frame, text="📋 Pegar aquí", 
+                             font=("Segoe UI", 10, "bold"),
+                             bg="#4CAF50", fg="white",
+                             command=pegar_en_nota)
+        btn_pegar.pack(side=tk.RIGHT)
+        
+        # Doble clic para pegar
+        listbox.bind('<Double-Button-1>', lambda e: pegar_en_nota())
+        
+        # Centrar
+        dialog.update_idletasks()
+        x = self.parent.winfo_rootx() + (self.parent.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = self.parent.winfo_rooty() + (self.parent.winfo_height() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
     
     def _crear_interfaz(self):
         """Crea la interfaz de la pestaña."""
@@ -262,6 +356,10 @@ class TabAnotaciones:
         self.canvas_notas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas_notas.bind("<Button-4>", self._on_mousewheel)
         self.canvas_notas.bind("<Button-5>", self._on_mousewheel)
+        
+        # Binding global para pegar imagen desde portapapeles
+        self.canvas_notas.bind('<Control-v>', self._pegar_imagen_global)
+        self.canvas_notas.bind('<Control-V>', self._pegar_imagen_global)
         
         # Cargar anotaciones existentes (sin threading durante inicialización)
         self._cargar_anotaciones(use_threading=False)
@@ -368,8 +466,8 @@ class TabAnotaciones:
         fecha = self._fecha_actual()
         filtro = self.filtro_notas_var.get()
         
-        # Obtener notas según el filtro actual
-        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+        # Obtener notas según el filtro actual (incluir eliminadas para poder filtrar)
+        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
         
         # Aplicar filtro
         if filtro == "Eliminadas":
@@ -441,8 +539,8 @@ class TabAnotaciones:
             try:
                 print(f"[DEBUG] Cargando anotaciones para fecha: {fecha}, filtro: {filtro}")
                 
-                # Obtener notas con la fecha específica
-                notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+                # Obtener notas con la fecha específica (incluir eliminadas para poder filtrar)
+                notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
                 
                 print(f"[DEBUG] Total de notas en BD para {fecha}: {len(notas)}")
                 
@@ -565,7 +663,6 @@ class TabAnotaciones:
         x = nota.get('pos_x', 20)
         y = nota.get('pos_y', 20)
         ancho = nota.get('ancho', self.NOTA_ANCHO)
-        altura = nota.get('alto', self.NOTA_ALTO)
         color = nota.get('color', '#FFEB3B')
         titulo = nota.get('titulo', 'Sin título')
         contenido = nota.get('contenido', '')
@@ -573,6 +670,15 @@ class TabAnotaciones:
         archivada = nota.get('archivada', 0)
         eliminada = nota.get('eliminada', 0)
         es_checklist = nota.get('es_checklist', 0)
+        attachments = nota.get('attachments') or []
+        
+        # Ajustar altura según contenido
+        altura_base = nota.get('alto', self.NOTA_ALTO)
+        if attachments:
+            # Agregar espacio extra para el botón y miniaturas
+            altura = max(altura_base, 280)
+        else:
+            altura = altura_base
         
         # Frame para la nota
         frame = tk.Frame(self.canvas_notas, bg=color, bd=2, relief=tk.RAISED)
@@ -596,9 +702,10 @@ class TabAnotaciones:
         # Indicador de checklist
         tipo_icon = '☑️' if es_checklist else '📝'
         
-        # Indicador de eliminada
+        # Indicador de adjuntos (attachments ya se obtuvieron arriba)
+        attach_icon = f"📎{len(attachments)}" if attachments else ''
         eliminada_icon = '🗑️' if eliminada else ''
-        titulo_display = f"{tipo_icon}{icon} {titulo[:15]}{eliminada_icon}"
+        titulo_display = f"{tipo_icon}{icon} {titulo[:12]}{attach_icon}{eliminada_icon}"
         
         lbl_titulo = tk.Label(barra, text=titulo_display, 
                               bg=self._oscurecer_color(color),
@@ -606,9 +713,17 @@ class TabAnotaciones:
                               fg="#999999" if eliminada else "black")
         lbl_titulo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
+        # Doble clic para renombrar el título directamente
+        lbl_titulo.bind("<Double-Button-1>", lambda e: self._renombrar_titulo_inline(nota_id, barra, lbl_titulo, color))
+        
         # Botones de control
         btn_frame = tk.Frame(barra, bg=self._oscurecer_color(color))
         btn_frame.pack(side=tk.RIGHT)
+        
+        # Botón para adjuntar foto rápidamente
+        tk.Button(btn_frame, text="📷", font=("Segoe UI", 8), bd=0, 
+                  bg=self._oscurecer_color(color), 
+                  command=lambda: self._adjuntar_foto_rapido(nota_id)).pack(side=tk.LEFT)
         
         tk.Button(btn_frame, text="✏️", font=("Segoe UI", 8), bd=0, 
                   bg=self._oscurecer_color(color), 
@@ -637,6 +752,10 @@ class TabAnotaciones:
         else:
             self._crear_contenido_texto(frame, nota_id, contenido, color)
         
+        # Mostrar miniaturas de imágenes si hay adjuntos de imagen
+        if attachments:
+            self._crear_vista_adjuntos(frame, nota_id, attachments, color)
+        
         # Crear ventana en canvas
         window_id = self.canvas_notas.create_window(x, y, window=frame, anchor="nw", 
                                                      width=ancho, height=altura)
@@ -646,6 +765,60 @@ class TabAnotaciones:
         # Hacer la nota arrastrable desde la barra de título y el label
         self._hacer_arrastrable(window_id, barra, nota_id)
         self._hacer_arrastrable(window_id, lbl_titulo, nota_id)
+        
+        # Binding para pegar imagen con Ctrl+V en cualquier parte de la nota
+        frame.bind('<Control-v>', lambda e, nid=nota_id: self._handle_paste(e, nid))
+        frame.bind('<Control-V>', lambda e, nid=nota_id: self._handle_paste(e, nid))
+        barra.bind('<Control-v>', lambda e, nid=nota_id: self._handle_paste(e, nid))
+        barra.bind('<Control-V>', lambda e, nid=nota_id: self._handle_paste(e, nid))
+    
+    def _renombrar_titulo_inline(self, nota_id: int, barra: tk.Frame, lbl_titulo: tk.Label, color: str):
+        """Permite renombrar el título de la nota directamente sin modal."""
+        # Obtener título actual (sin los iconos)
+        if not HAS_DB:
+            return
+        
+        fecha = self._fecha_actual()
+        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
+        nota = next((n for n in notas if n['id'] == nota_id), None)
+        if not nota:
+            return
+        
+        titulo_actual = nota.get('titulo', 'Sin título')
+        
+        # Ocultar el label y crear un Entry en su lugar
+        lbl_titulo.pack_forget()
+        
+        entry = tk.Entry(barra, font=("Segoe UI", 9, "bold"),
+                         bg=self._oscurecer_color(color), bd=0,
+                         highlightthickness=1, highlightcolor="#2196F3")
+        entry.insert(0, titulo_actual)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        
+        def guardar_titulo(event=None):
+            nuevo_titulo = entry.get().strip()
+            if not nuevo_titulo:
+                nuevo_titulo = titulo_actual
+            
+            # Actualizar en BD
+            try:
+                db_local.actualizar_anotacion(nota_id, titulo=nuevo_titulo)
+            except Exception as e:
+                print(f"[ERROR] No se pudo actualizar título: {e}")
+            
+            # Destruir entry y recargar notas
+            entry.destroy()
+            self._cargar_anotaciones()
+        
+        def cancelar(event=None):
+            entry.destroy()
+            lbl_titulo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        entry.bind("<Return>", guardar_titulo)
+        entry.bind("<Escape>", cancelar)
+        entry.bind("<FocusOut>", guardar_titulo)
     
     def _crear_contenido_texto(self, parent, nota_id, contenido, color):
         """Crea el contenido de texto normal."""
@@ -744,7 +917,7 @@ class TabAnotaciones:
             return
         
         fecha = self._fecha_actual()
-        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
         nota = next((n for n in notas if n['id'] == nota_id), None)
         if not nota:
             return
@@ -777,7 +950,7 @@ class TabAnotaciones:
             texto = texto_var.get().strip()
             if texto:
                 fecha = self._fecha_actual()
-                notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+                notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
                 nota = next((n for n in notas if n['id'] == nota_id), None)
                 if nota:
                     items = self._parsear_checklist(nota.get('contenido', ''))
@@ -797,7 +970,7 @@ class TabAnotaciones:
             return
         
         fecha = self._fecha_actual()
-        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
         nota = next((n for n in notas if n['id'] == nota_id), None)
         if not nota:
             return
@@ -808,6 +981,303 @@ class TabAnotaciones:
             nuevo_contenido = self._formatear_checklist(items)
             db_local.actualizar_anotacion(nota_id, contenido=nuevo_contenido)
             self._cargar_anotaciones()
+    
+    def _adjuntar_foto_rapido(self, nota_id: int):
+        """Abre diálogo para adjuntar una foto rápidamente."""
+        if not HAS_DB:
+            return
+        
+        # Filtros para imágenes
+        filetypes = [
+            ("Imágenes", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+            ("PNG", "*.png"),
+            ("JPEG", "*.jpg *.jpeg"),
+            ("GIF", "*.gif"),
+            ("Todos los archivos", "*.*")
+        ]
+        
+        files = filedialog.askopenfilenames(
+            title='📷 Seleccionar fotos para adjuntar',
+            filetypes=filetypes
+        )
+        
+        if not files:
+            return
+        
+        attach_dir = self._ensure_attachments_dir()
+        fecha = self._fecha_actual()
+        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
+        nota = next((n for n in notas if n['id'] == nota_id), None)
+        
+        if not nota:
+            return
+        
+        attachments = nota.get('attachments') or []
+        
+        for f in files:
+            try:
+                nombre = os.path.basename(f)
+                prefijo = time.strftime('%Y%m%d%H%M%S')
+                dest_name = f"{prefijo}_{nombre}"
+                dest_path = os.path.join(attach_dir, dest_name)
+                shutil.copy2(f, dest_path)
+                rel_path = os.path.relpath(dest_path, 
+                    start=os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+                attachments.append(rel_path)
+            except Exception as e:
+                messagebox.showerror('Error', f'No se pudo adjuntar {f}: {e}')
+        
+        # Actualizar BD
+        db_local.actualizar_anotacion(nota_id, attachments=attachments)
+        self._cargar_anotaciones()
+        messagebox.showinfo('✓ Fotos adjuntadas', f'Se adjuntaron {len(files)} foto(s)')
+    
+    def _crear_vista_adjuntos(self, parent, nota_id: int, attachments: list, color: str):
+        """Crea una vista compacta de adjuntos con botón prominente."""
+        if not attachments:
+            return
+        
+        # Filtrar imágenes y otros
+        extensiones_imagen = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+        imagenes = [a for a in attachments if os.path.splitext(a)[1].lower() in extensiones_imagen]
+        otros = [a for a in attachments if os.path.splitext(a)[1].lower() not in extensiones_imagen]
+        
+        # Frame para adjuntos - fondo destacado
+        frame_adj = tk.Frame(parent, bg='#E3F2FD', bd=1, relief=tk.GROOVE)
+        frame_adj.pack(fill=tk.X, side=tk.BOTTOM, padx=3, pady=3)
+        
+        # Fila superior: miniaturas + contador
+        top_frame = tk.Frame(frame_adj, bg='#E3F2FD')
+        top_frame.pack(fill=tk.X, padx=2, pady=2)
+        
+        # Mostrar miniaturas compactas (máximo 4)
+        if imagenes and HAS_PIL:
+            if not hasattr(self, '_thumb_refs'):
+                self._thumb_refs = {}
+            
+            for i, img_path in enumerate(imagenes[:4]):
+                try:
+                    base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                    full_path = os.path.join(base, img_path)
+                    
+                    if os.path.exists(full_path):
+                        img = Image.open(full_path)
+                        img.thumbnail((35, 35))
+                        photo = ImageTk.PhotoImage(img)
+                        
+                        key = f"{nota_id}_{i}"
+                        self._thumb_refs[key] = photo
+                        
+                        lbl = tk.Label(top_frame, image=photo, bg='#E3F2FD', 
+                                      cursor="hand2", bd=1, relief=tk.RAISED)
+                        lbl.pack(side=tk.LEFT, padx=1)
+                        lbl.bind("<Button-1>", lambda e, p=full_path: self._abrir_imagen(p))
+                except Exception:
+                    pass
+            
+            # Indicador de más
+            if len(imagenes) > 4:
+                tk.Label(top_frame, text=f"+{len(imagenes)-4}", 
+                        bg='#E3F2FD', font=("Segoe UI", 8, "bold"), fg="#1565C0").pack(side=tk.LEFT, padx=2)
+        
+        # Indicador de otros archivos
+        if otros:
+            tk.Label(top_frame, text=f"📎{len(otros)}", 
+                    bg='#E3F2FD', font=("Segoe UI", 8), fg="#666").pack(side=tk.LEFT, padx=2)
+        
+        # Botón grande y visible para ver/editar adjuntos
+        btn_ver = tk.Button(frame_adj, 
+                           text=f"👁️ VER {len(attachments)} FOTO(S)", 
+                           font=("Segoe UI", 9, "bold"), 
+                           bg="#2196F3", fg="white",
+                           activebackground="#1976D2", activeforeground="white",
+                           cursor="hand2", relief=tk.RAISED, bd=2,
+                           command=lambda: self._ver_fotos_nota(nota_id, attachments))
+        btn_ver.pack(fill=tk.X, padx=2, pady=(2, 3))
+    
+    def _ver_fotos_nota(self, nota_id: int, attachments: list):
+        """Muestra un visor de fotos para los adjuntos de una nota."""
+        if not HAS_PIL:
+            messagebox.showerror('Error', 'Se requiere PIL/Pillow para ver imágenes')
+            return
+        
+        if not attachments:
+            messagebox.showinfo('Sin adjuntos', 'Esta nota no tiene fotos adjuntas')
+            return
+        
+        # Filtrar solo imágenes
+        extensiones_imagen = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+        imagenes = [a for a in attachments if os.path.splitext(a)[1].lower() in extensiones_imagen]
+        
+        if not imagenes:
+            messagebox.showinfo('Sin fotos', 'Esta nota no tiene fotos, solo otros archivos')
+            return
+        
+        # Importar PIL localmente para asegurar disponibilidad
+        from PIL import Image as PILImage, ImageTk as PILImageTk
+        
+        # Crear ventana de visor
+        visor = tk.Toplevel(self.parent)
+        visor.title(f"📷 Fotos de la nota ({len(imagenes)})")
+        visor.transient(self.parent)
+        visor.grab_set()
+        visor.geometry("700x550")
+        visor.configure(bg="#1a1a1a")
+        
+        # Variables de navegación
+        indice_actual = tk.IntVar(value=0)
+        
+        # Guardar referencias de imágenes
+        if not hasattr(self, '_visor_img_refs'):
+            self._visor_img_refs = {}
+        
+        # Frame superior con controles
+        top_frame = tk.Frame(visor, bg="#333")
+        top_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        lbl_contador = tk.Label(top_frame, text=f"1 / {len(imagenes)}", 
+                               font=("Segoe UI", 12, "bold"), bg="#333", fg="white")
+        lbl_contador.pack(side=tk.LEFT, padx=10)
+        
+        # Botón cerrar
+        tk.Button(top_frame, text="✕ Cerrar", font=("Segoe UI", 10),
+                 bg="#E53935", fg="white", activebackground="#C62828",
+                 command=visor.destroy).pack(side=tk.RIGHT, padx=5)
+        
+        # Botón abrir con app externa
+        def abrir_externa():
+            idx = indice_actual.get()
+            base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            full_path = os.path.join(base, imagenes[idx])
+            self._abrir_imagen(full_path)
+        
+        tk.Button(top_frame, text="🔗 Abrir externa", font=("Segoe UI", 10),
+                 bg="#4CAF50", fg="white", activebackground="#388E3C",
+                 command=abrir_externa).pack(side=tk.RIGHT, padx=5)
+        
+        # Frame central para la imagen
+        img_frame = tk.Frame(visor, bg="#1a1a1a")
+        img_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        lbl_imagen = tk.Label(img_frame, bg="#1a1a1a")
+        lbl_imagen.pack(fill=tk.BOTH, expand=True)
+        
+        # Nombre del archivo
+        lbl_nombre = tk.Label(visor, text="", font=("Segoe UI", 9), bg="#1a1a1a", fg="#aaa")
+        lbl_nombre.pack(pady=(0, 5))
+        
+        def mostrar_imagen(idx):
+            """Muestra la imagen en el índice dado."""
+            if idx < 0 or idx >= len(imagenes):
+                return
+            
+            indice_actual.set(idx)
+            lbl_contador.config(text=f"{idx + 1} / {len(imagenes)}")
+            
+            base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            full_path = os.path.join(base, imagenes[idx])
+            lbl_nombre.config(text=os.path.basename(imagenes[idx]))
+            
+            if not os.path.exists(full_path):
+                lbl_imagen.config(image='', text="❌ Imagen no encontrada", fg="red",
+                                 font=("Segoe UI", 14))
+                return
+            
+            try:
+                img = PILImage.open(full_path)
+                
+                # Calcular tamaño para ajustar al frame (mantener proporción)
+                visor.update_idletasks()
+                max_w = img_frame.winfo_width() - 20 or 650
+                max_h = img_frame.winfo_height() - 20 or 400
+                
+                # Redimensionar manteniendo proporción
+                img_w, img_h = img.size
+                ratio = min(max_w / img_w, max_h / img_h, 1.0)  # No ampliar más de original
+                new_w = int(img_w * ratio)
+                new_h = int(img_h * ratio)
+                
+                if ratio < 1.0:
+                    img = img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+                
+                photo = PILImageTk.PhotoImage(img)
+                self._visor_img_refs[nota_id] = photo  # Guardar referencia
+                
+                lbl_imagen.config(image=photo, text='')
+            except Exception as e:
+                lbl_imagen.config(image='', text=f"❌ Error: {e}", fg="red",
+                                 font=("Segoe UI", 12))
+        
+        # Frame inferior con navegación
+        nav_frame = tk.Frame(visor, bg="#333")
+        nav_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        def anterior():
+            idx = indice_actual.get()
+            if idx > 0:
+                mostrar_imagen(idx - 1)
+        
+        def siguiente():
+            idx = indice_actual.get()
+            if idx < len(imagenes) - 1:
+                mostrar_imagen(idx + 1)
+        
+        btn_ant = tk.Button(nav_frame, text="◀ Anterior", font=("Segoe UI", 11, "bold"),
+                           bg="#2196F3", fg="white", activebackground="#1976D2",
+                           width=12, command=anterior)
+        btn_ant.pack(side=tk.LEFT, padx=20, pady=5)
+        
+        # Miniaturas en el centro
+        thumb_frame = tk.Frame(nav_frame, bg="#333")
+        thumb_frame.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=10)
+        
+        for i, img_path in enumerate(imagenes[:8]):  # Máximo 8 miniaturas
+            try:
+                base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                full_path = os.path.join(base, img_path)
+                if os.path.exists(full_path):
+                    img = PILImage.open(full_path)
+                    img.thumbnail((40, 40))
+                    photo = PILImageTk.PhotoImage(img)
+                    
+                    key = f"visor_thumb_{nota_id}_{i}"
+                    self._visor_img_refs[key] = photo
+                    
+                    btn_thumb = tk.Button(thumb_frame, image=photo, bg="#333", bd=2,
+                                         command=lambda idx=i: mostrar_imagen(idx))
+                    btn_thumb.pack(side=tk.LEFT, padx=2)
+            except Exception:
+                pass
+        
+        btn_sig = tk.Button(nav_frame, text="Siguiente ▶", font=("Segoe UI", 11, "bold"),
+                           bg="#2196F3", fg="white", activebackground="#1976D2",
+                           width=12, command=siguiente)
+        btn_sig.pack(side=tk.RIGHT, padx=20, pady=5)
+        
+        # Atajos de teclado
+        visor.bind("<Left>", lambda e: anterior())
+        visor.bind("<Right>", lambda e: siguiente())
+        visor.bind("<Escape>", lambda e: visor.destroy())
+        
+        # Mostrar primera imagen
+        visor.after(100, lambda: mostrar_imagen(0))
+        
+        # Centrar ventana
+        visor.update_idletasks()
+        x = self.parent.winfo_rootx() + (self.parent.winfo_width() // 2) - (visor.winfo_width() // 2)
+        y = self.parent.winfo_rooty() + (self.parent.winfo_height() // 2) - (visor.winfo_height() // 2)
+        visor.geometry(f"+{x}+{y}")
+    
+    def _abrir_imagen(self, path: str):
+        """Abre una imagen con el visor del sistema."""
+        try:
+            if os.name == 'nt':
+                os.startfile(path)
+            else:
+                import subprocess
+                subprocess.Popen(['xdg-open', path])
+        except Exception as e:
+            messagebox.showerror('Error', f'No se pudo abrir: {e}')
     
     def _oscurecer_color(self, hex_color: str) -> str:
         """Oscurece un color hex."""
@@ -888,78 +1358,195 @@ class TabAnotaciones:
         widget.bind("<ButtonRelease-1>", on_release, add="+")
     
     def _nueva_anotacion(self):
-        """Crea una nueva anotación de texto con mejor validación y persistencia."""
+        """Crea una nueva anotación de texto preguntando primero la prioridad."""
         if not HAS_DB:
             messagebox.showerror("Error", "Base de datos no disponible")
             return
         
+        # Mostrar diálogo de selección de prioridad
+        self._mostrar_selector_prioridad(es_checklist=False)
+    
+    def _mostrar_selector_prioridad(self, es_checklist: bool = False):
+        """Muestra un diálogo para seleccionar la prioridad de la nueva nota."""
+        # Colores y posiciones según prioridad
+        # Urgente: Rojo, primera posición (arriba-izquierda)
+        # Alta: Naranja, segunda posición
+        # Normal: Amarillo, siguiente posición disponible
+        # Baja: Verde, al final
+        prioridades_config = {
+            'urgente': {'color': '#EF9A9A', 'icon': '🔥', 'orden': 0},
+            'alta':    {'color': '#FFAB91', 'icon': '⬆️', 'orden': 1},
+            'normal':  {'color': '#FFEB3B', 'icon': '➖', 'orden': 2},
+            'baja':    {'color': '#A5D6A7', 'icon': '⬇️', 'orden': 3}
+        }
+        
+        # Guardar config como atributo de instancia para usar después
+        self._prioridades_config = prioridades_config
+        
+        # Crear ventana de selección
+        dialog = tk.Toplevel(self.parent)
+        dialog.title("📌 Prioridad de la nota")
+        dialog.transient(self.parent)
+        dialog.grab_set()
+        
+        # Tamaño de ventana más amplio
+        dialog.geometry("320x280")
+        dialog.resizable(False, False)
+        
+        # Frame principal
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="¿Qué prioridad tiene esta nota?", 
+                  font=("Segoe UI", 11, "bold")).pack(pady=(0, 15))
+        
+        prioridad_var = tk.StringVar(value='normal')
+        
+        # Radiobuttons de prioridad
+        radio_frame = ttk.Frame(frame)
+        radio_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        for prioridad, config in prioridades_config.items():
+            rb_frame = tk.Frame(radio_frame, bg=config['color'], padx=5, pady=3)
+            rb_frame.pack(fill=tk.X, pady=2)
+            
+            rb = tk.Radiobutton(rb_frame, 
+                               text=f"{config['icon']} {prioridad.capitalize()}",
+                               variable=prioridad_var,
+                               value=prioridad,
+                               font=("Segoe UI", 10),
+                               bg=config['color'],
+                               activebackground=self._oscurecer_color(config['color']),
+                               selectcolor=self._oscurecer_color(config['color']),
+                               anchor="w",
+                               indicatoron=True)
+            rb.pack(fill=tk.X)
+        
+        # Frame para botones
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        # Botón Cancelar
+        def cancelar():
+            dialog.destroy()
+        
+        ttk.Button(btn_frame, text="Cancelar", command=cancelar).pack(side=tk.LEFT, padx=5)
+        
+        # Botón Crear nota (más prominente)
+        def crear_nota():
+            prioridad = prioridad_var.get()
+            dialog.destroy()
+            self._crear_nota_con_prioridad(prioridad, es_checklist)
+        
+        btn_crear = tk.Button(btn_frame, text="➕ Agregar Nota", command=crear_nota,
+                             font=("Segoe UI", 10, "bold"), bg="#4CAF50", fg="white",
+                             activebackground="#388E3C", activeforeground="white",
+                             padx=15, pady=5)
+        btn_crear.pack(side=tk.RIGHT, padx=5)
+        
+        # Centrar ventana respecto a la principal
+        dialog.update_idletasks()
+        x = self.parent.winfo_rootx() + (self.parent.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = self.parent.winfo_rooty() + (self.parent.winfo_height() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+    
+    def _crear_nota_con_prioridad(self, prioridad: str, es_checklist: bool):
+        """Crea la nota con la prioridad seleccionada."""
         try:
-            color = self.color_nota_var.get()
-            x, y = self._calcular_siguiente_posicion()
+            # Usar config guardada o crear una por defecto
+            prioridades_config = getattr(self, '_prioridades_config', {
+                'urgente': {'color': '#EF9A9A', 'icon': '🔥', 'orden': 0},
+                'alta':    {'color': '#FFAB91', 'icon': '⬆️', 'orden': 1},
+                'normal':  {'color': '#FFEB3B', 'icon': '➖', 'orden': 2},
+                'baja':    {'color': '#A5D6A7', 'icon': '⬇️', 'orden': 3}
+            })
+            
+            config = prioridades_config.get(prioridad, prioridades_config['normal'])
+            color = config['color']
+            orden = config['orden']
+            
+            # Calcular posición según prioridad
+            # Las urgentes/altas van primero, las normales/bajas después
+            x, y = self._calcular_posicion_por_prioridad(orden)
+            
+            # Usar la fecha del DataStore para consistencia
             fecha = self._fecha_actual()
+            
+            titulo = "Nueva lista" if es_checklist else "Nueva nota"
+            contenido = "[ ] Primer item" if es_checklist else ""
 
-            print(f"[DEBUG] Creando nueva anotación con fecha: {fecha}")
+            print(f"[DEBUG] Creando nota - Prioridad: {prioridad}, Color: {color}, Fecha: {fecha}")
             
             nota_id = db_local.agregar_anotacion(
-                titulo="Nueva nota", 
-                contenido="", 
+                fecha=fecha,
+                titulo=titulo, 
+                contenido=contenido, 
                 color=color,
                 pos_x=x,
                 pos_y=y,
-                es_checklist=False,
-                fecha=fecha
+                es_checklist=es_checklist,
+                prioridad=prioridad
             )
             
-            print(f"[DEBUG] Anotación creada con ID: {nota_id}")
+            print(f"[DEBUG] Nota creada con ID: {nota_id}")
             
-            if nota_id > 0:
-                # Forzar recarga después de pequeño delay para asegurar BD escribió
-                self.parent.after(200, self._cargar_anotaciones)
+            if nota_id and nota_id > 0:
+                # Recargar anotaciones inmediatamente
+                self.parent.after(100, self._cargar_anotaciones)
             else:
                 messagebox.showerror('Error', 'No se pudo crear la nota (ID inválido)')
                 print(f"[ERROR] agregar_anotacion retornó ID inválido: {nota_id}")
         except Exception as e:
             messagebox.showerror('Error', f'Error creando nota: {e}')
-            print(f"[ERROR] Excepción en _nueva_anotacion: {e}")
+            print(f"[ERROR] Excepción en _crear_nota_con_prioridad: {e}")
             import traceback
             traceback.print_exc()
     
+    def _calcular_posicion_por_prioridad(self, orden_prioridad: int) -> tuple:
+        """
+        Calcula la posición según la prioridad.
+        Prioridad urgente/alta: primeras filas
+        Prioridad normal: filas intermedias
+        Prioridad baja: últimas filas
+        """
+        if not HAS_DB:
+            return (self.MARGEN_X, self.MARGEN_Y)
+        
+        fecha = self._fecha_actual()
+        notas = db_local.obtener_anotaciones(incluir_archivadas=False, fecha=fecha)
+        
+        # Fila base según prioridad (0=urgente, 1=alta, 2=normal, 3=baja)
+        fila_base = orden_prioridad * 2  # Espaciado de 2 filas entre prioridades
+        
+        # Buscar posiciones ocupadas en esas filas
+        posiciones_ocupadas = set()
+        for nota in notas:
+            x = nota.get('pos_x', 0)
+            y = nota.get('pos_y', 0)
+            col = round((x - self.MARGEN_X) / (self.NOTA_ANCHO + self.MARGEN_X))
+            fila = round((y - self.MARGEN_Y) / (self.NOTA_ALTO + self.MARGEN_Y))
+            posiciones_ocupadas.add((col, fila))
+        
+        # Buscar primera columna libre en la fila base o siguiente
+        for fila_offset in range(10):  # Buscar en las siguientes 10 filas
+            fila = fila_base + fila_offset
+            for col in range(self.COLUMNAS_MAX):
+                if (col, fila) not in posiciones_ocupadas:
+                    x = self.MARGEN_X + col * (self.NOTA_ANCHO + self.MARGEN_X)
+                    y = self.MARGEN_Y + fila * (self.NOTA_ALTO + self.MARGEN_Y)
+                    return (x, y)
+        
+        # Fallback
+        return self._calcular_siguiente_posicion()
+    
     def _nueva_lista(self):
-        """Crea una nueva nota tipo checklist con mejor validación y persistencia."""
+        """Crea una nueva lista preguntando primero la prioridad."""
         if not HAS_DB:
             messagebox.showerror("Error", "Base de datos no disponible")
             return
         
-        try:
-            color = self.color_nota_var.get()
-            x, y = self._calcular_siguiente_posicion()
-            fecha = self._fecha_actual()
-
-            print(f"[DEBUG] Creando nueva lista con fecha: {fecha}")
-            
-            nota_id = db_local.agregar_anotacion(
-                titulo="Nueva lista", 
-                contenido="[ ] Primer item", 
-                color=color,
-                pos_x=x,
-                pos_y=y,
-                es_checklist=True,
-                fecha=fecha
-            )
-            
-            print(f"[DEBUG] Lista creada con ID: {nota_id}")
-            
-            if nota_id > 0:
-                # Forzar recarga después de pequeño delay para asegurar BD escribió
-                self.parent.after(200, self._cargar_anotaciones)
-            else:
-                messagebox.showerror('Error', 'No se pudo crear la lista (ID inválido)')
-                print(f"[ERROR] agregar_anotacion retornó ID inválido: {nota_id}")
-        except Exception as e:
-            messagebox.showerror('Error', f'Error creando lista: {e}')
-            print(f"[ERROR] Excepción en _nueva_lista: {e}")
-            import traceback
-            traceback.print_exc()
+        # Mostrar diálogo de selección de prioridad
+        self._mostrar_selector_prioridad(es_checklist=True)
     
     def _editar_anotacion(self, nota_id: int):
         """Abre diálogo para editar una anotación."""
@@ -968,7 +1555,7 @@ class TabAnotaciones:
         
         # Obtener datos actuales
         fecha = self._fecha_actual()
-        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha)
+        notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
         nota = next((n for n in notas if n['id'] == nota_id), None)
         if not nota:
             return
@@ -1103,9 +1690,35 @@ class TabAnotaciones:
                     pass
                 attachments_listbox.delete(idx)
 
-        ttk.Button(attach_btns, text='📎 Adjuntar', command=agregar_adjuntos).pack(fill=tk.X, pady=2)
-        ttk.Button(attach_btns, text='Abrir', command=abrir_attachment).pack(fill=tk.X, pady=2)
-        ttk.Button(attach_btns, text='Eliminar', command=eliminar_attachment).pack(fill=tk.X, pady=2)
+        def agregar_fotos():
+            """Adjuntar solo imágenes con filtros específicos."""
+            filetypes = [
+                ("Imágenes", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("PNG", "*.png"),
+                ("JPEG", "*.jpg *.jpeg"),
+                ("GIF", "*.gif"),
+                ("Todos los archivos", "*.*")
+            ]
+            files = filedialog.askopenfilenames(title='📷 Seleccionar fotos', filetypes=filetypes)
+            if not files:
+                return
+            attach_dir = ensure_attachments_dir()
+            for f in files:
+                try:
+                    nombre = os.path.basename(f)
+                    prefijo = time.strftime('%Y%m%d%H%M%S%f')[-6:]
+                    dest_name = f"{prefijo}_{nombre}"
+                    dest_path = os.path.join(attach_dir, dest_name)
+                    shutil.copy2(f, dest_path)
+                    rel_path = os.path.relpath(dest_path, start=os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+                    attachments_listbox.insert(tk.END, rel_path)
+                except Exception as e:
+                    messagebox.showerror('Error', f'No se pudo adjuntar {f}: {e}')
+
+        ttk.Button(attach_btns, text='📷 Fotos', command=agregar_fotos).pack(fill=tk.X, pady=2)
+        ttk.Button(attach_btns, text='📎 Archivos', command=agregar_adjuntos).pack(fill=tk.X, pady=2)
+        ttk.Button(attach_btns, text='👁️ Abrir', command=abrir_attachment).pack(fill=tk.X, pady=2)
+        ttk.Button(attach_btns, text='🗑️ Eliminar', command=eliminar_attachment).pack(fill=tk.X, pady=2)
         
         def guardar():
             es_checklist = tipo_var.get() == "checklist"

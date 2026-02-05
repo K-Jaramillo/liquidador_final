@@ -472,11 +472,14 @@ def init_database():
     # ══════════════════════════════════════════════════════════════════
     # TABLA: TRANSFERENCIAS
     # Guarda las transferencias por fecha
+    # repartidor = quien realiza la transferencia
+    # destinatario = cuenta/banco/persona a quien va dirigida
     # ══════════════════════════════════════════════════════════════════
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transferencias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             fecha DATE NOT NULL,
+            repartidor TEXT NOT NULL DEFAULT '',
             destinatario TEXT NOT NULL,
             concepto TEXT,
             monto REAL NOT NULL DEFAULT 0,
@@ -485,7 +488,17 @@ def init_database():
             fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    # Migración: agregar columna repartidor si no existe (para bases de datos existentes)
+    try:
+        cursor.execute('ALTER TABLE transferencias ADD COLUMN repartidor TEXT DEFAULT ""')
+    except: pass
+    
+    # Índices (después de la migración)
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_transferencias_fecha ON transferencias(fecha)')
+    try:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_transferencias_repartidor ON transferencias(repartidor)')
+    except: pass
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: CREDITOS_PUNTEADOS
@@ -2958,14 +2971,23 @@ def actualizar_pago_socios(pago_id: int, socio: str, concepto: str, monto: float
 # FUNCIONES PARA TRANSFERENCIAS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def agregar_transferencia(fecha: str, destinatario: str, concepto: str, monto: float, observaciones: str = '') -> int:
-    """Agrega una nueva transferencia. Retorna el ID del registro creado."""
+def agregar_transferencia(fecha: str, repartidor: str, destinatario: str, concepto: str, monto: float, observaciones: str = '') -> int:
+    """Agrega una nueva transferencia. Retorna el ID del registro creado.
+    
+    Args:
+        fecha: Fecha de la transferencia
+        repartidor: Quien realiza la transferencia
+        destinatario: Cuenta/banco/persona destino
+        concepto: Descripción de la transferencia
+        monto: Monto transferido
+        observaciones: Notas adicionales
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO transferencias (fecha, destinatario, concepto, monto, observaciones)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (fecha, destinatario, concepto, monto, observaciones))
+        INSERT INTO transferencias (fecha, repartidor, destinatario, concepto, monto, observaciones)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (fecha, repartidor, destinatario, concepto, monto, observaciones))
     conn.commit()
     new_id = cursor.lastrowid
     conn.close()
@@ -2977,7 +2999,7 @@ def obtener_transferencias_fecha(fecha: str) -> List[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, fecha, destinatario, concepto, monto, observaciones, fecha_creacion
+        SELECT id, fecha, repartidor, destinatario, concepto, monto, observaciones, fecha_creacion
         FROM transferencias 
         WHERE fecha = ?
         ORDER BY id DESC
@@ -2987,16 +3009,21 @@ def obtener_transferencias_fecha(fecha: str) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def obtener_total_transferencias_fecha(fecha: str, destinatario: str = '') -> float:
-    """Obtiene el total de transferencias de una fecha, opcionalmente filtrado por destinatario."""
+def obtener_total_transferencias_fecha(fecha: str, repartidor: str = '') -> float:
+    """Obtiene el total de transferencias de una fecha, opcionalmente filtrado por repartidor.
+    
+    Args:
+        fecha: Fecha de las transferencias
+        repartidor: Filtrar por quien realizó la transferencia (opcional)
+    """
     conn = get_connection()
     cursor = conn.cursor()
-    if destinatario:
+    if repartidor:
         cursor.execute('''
             SELECT COALESCE(SUM(monto), 0) as total
             FROM transferencias 
-            WHERE fecha = ? AND destinatario = ?
-        ''', (fecha, destinatario))
+            WHERE fecha = ? AND repartidor = ?
+        ''', (fecha, repartidor))
     else:
         cursor.execute('''
             SELECT COALESCE(SUM(monto), 0) as total
@@ -3022,16 +3049,16 @@ def eliminar_transferencia(transferencia_id: int) -> bool:
         return False
 
 
-def actualizar_transferencia(transferencia_id: int, destinatario: str, concepto: str, monto: float, observaciones: str = '') -> bool:
+def actualizar_transferencia(transferencia_id: int, repartidor: str, destinatario: str, concepto: str, monto: float, observaciones: str = '') -> bool:
     """Actualiza una transferencia existente."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE transferencias 
-            SET destinatario = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            SET repartidor = ?, destinatario = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (destinatario, concepto, monto, observaciones, transferencia_id))
+        ''', (repartidor, destinatario, concepto, monto, observaciones, transferencia_id))
         conn.commit()
         conn.close()
         return True
@@ -3182,18 +3209,29 @@ def obtener_ultimo_corte_cajero() -> Optional[Dict[str, Any]]:
 
 def agregar_anotacion(fecha: str, titulo: str = '', contenido: str = '', color: str = '#FFEB3B',
                       es_checklist: bool = False, pos_x: int = 0, pos_y: int = 0,
-                      ancho: int = 220, alto: int = 180, prioridad: int = 0,
+                      ancho: int = 220, alto: int = 180, prioridad = 'normal',
                       attachments: List[str] = None) -> int:
-    """Agrega una nueva anotación. Retorna el ID del registro creado."""
+    """Agrega una nueva anotación. Retorna el ID del registro creado.
+    
+    prioridad puede ser string ('baja', 'normal', 'alta', 'urgente') o int (0-3).
+    """
     conn = get_connection()
     cursor = conn.cursor()
     attachments_json = json.dumps(attachments) if attachments else '[]'
+    
+    # Mapear prioridad string a integer
+    prioridad_map = {'baja': 0, 'normal': 1, 'alta': 2, 'urgente': 3}
+    if isinstance(prioridad, str):
+        prioridad_int = prioridad_map.get(prioridad.lower(), 1)
+    else:
+        prioridad_int = int(prioridad)
+    
     cursor.execute('''
         INSERT INTO anotaciones (fecha, titulo, contenido, color, es_checklist, 
                                  pos_x, pos_y, ancho, alto, prioridad, attachments)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (fecha, titulo, contenido, color, 1 if es_checklist else 0, 
-          pos_x, pos_y, ancho, alto, prioridad, attachments_json))
+          pos_x, pos_y, ancho, alto, prioridad_int, attachments_json))
     conn.commit()
     new_id = cursor.lastrowid
     conn.close()
@@ -3240,6 +3278,9 @@ def obtener_anotaciones(incluir_archivadas: bool = False, fecha: str = None,
     rows = cursor.fetchall()
     conn.close()
     
+    # Mapeo inverso de prioridad int a string
+    prioridad_map_inv = {0: 'baja', 1: 'normal', 2: 'alta', 3: 'urgente'}
+    
     result = []
     for row in rows:
         nota = dict(row)
@@ -3251,6 +3292,8 @@ def obtener_anotaciones(incluir_archivadas: bool = False, fecha: str = None,
         nota['es_checklist'] = bool(nota['es_checklist'])
         nota['archivada'] = bool(nota['archivada'])
         nota['eliminada'] = bool(nota['eliminada'])
+        # Convertir prioridad int a string
+        nota['prioridad'] = prioridad_map_inv.get(nota.get('prioridad', 1), 'normal')
         result.append(nota)
     
     return result
@@ -3268,6 +3311,9 @@ def actualizar_anotacion(nota_id: int, **kwargs) -> bool:
     if not kwargs:
         return False
     
+    # Mapeo de prioridad string a int
+    prioridad_map = {'baja': 0, 'normal': 1, 'alta': 2, 'urgente': 3}
+    
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -3283,6 +3329,9 @@ def actualizar_anotacion(nota_id: int, **kwargs) -> bool:
             elif campo in ('es_checklist', 'archivada', 'eliminada'):
                 # Convertir bool a int
                 valor = 1 if valor else 0
+            elif campo == 'prioridad' and isinstance(valor, str):
+                # Convertir prioridad string a int
+                valor = prioridad_map.get(valor.lower(), 1)
             campos.append(f"{campo} = ?")
             valores.append(valor)
         

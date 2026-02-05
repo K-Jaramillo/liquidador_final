@@ -562,10 +562,18 @@ class DataStore:
         return 0.0
 
     # --- transferencias ---
-    def agregar_transferencia(self, destinatario: str, concepto: str, monto: float, observaciones: str = ''):
-        """Agrega una transferencia y la persiste en SQLite."""
+    def agregar_transferencia(self, repartidor: str, destinatario: str, concepto: str, monto: float, observaciones: str = ''):
+        """Agrega una transferencia y la persiste en SQLite.
+        
+        Args:
+            repartidor: Quien realiza la transferencia
+            destinatario: Cuenta/banco/persona destino
+            concepto: Descripción
+            monto: Monto transferido
+            observaciones: Notas adicionales
+        """
         if USE_SQLITE:
-            transferencia_id = db_local.agregar_transferencia(self.fecha, destinatario, concepto, monto, observaciones)
+            transferencia_id = db_local.agregar_transferencia(self.fecha, repartidor, destinatario, concepto, monto, observaciones)
             self._notificar()
             return transferencia_id
         return -1
@@ -576,10 +584,10 @@ class DataStore:
             db_local.eliminar_transferencia(transferencia_id)
             self._notificar()
 
-    def actualizar_transferencia(self, transferencia_id: int, destinatario: str, concepto: str, monto: float, observaciones: str = ''):
+    def actualizar_transferencia(self, transferencia_id: int, repartidor: str, destinatario: str, concepto: str, monto: float, observaciones: str = ''):
         """Actualiza una transferencia existente."""
         if USE_SQLITE:
-            db_local.actualizar_transferencia(transferencia_id, destinatario, concepto, monto, observaciones)
+            db_local.actualizar_transferencia(transferencia_id, repartidor, destinatario, concepto, monto, observaciones)
             self._notificar()
 
     def get_transferencias(self) -> list:
@@ -6546,8 +6554,8 @@ ORDER BY V.FOLIO, DA.ID;
                                     iid=f"transf_{tr.get('id', 0)}",
                                     values=(tr.get('id', ''),
                                             "💸 Transferencia",
+                                            tr.get('repartidor', ''),
                                             tr.get('destinatario', ''),
-                                            tr.get('concepto', ''),
                                             f"${tr.get('monto', 0):,.2f}",
                                             tr.get('observaciones', '') or ''),
                                     tags=("transferencia",))
@@ -6619,7 +6627,9 @@ ORDER BY V.FOLIO, DA.ID;
             self.ds.agregar_pago_socios(rep, concepto, monto, "")
         elif tipo == "TRANSFERENCIA":
             # Guardar en tabla dedicada transferencias
-            self.ds.agregar_transferencia(rep, concepto, monto, "")
+            # rep = repartidor (quien hace la transferencia)
+            # concepto = destinatario (cuenta/banco/persona destino)
+            self.ds.agregar_transferencia(rep, concepto, "Transferencia", monto, "")
         elif tipo == "GASTO CAJERO":
             # Gasto de cajero
             self.ds.agregar_gasto("CAJERO", concepto, monto, "")
@@ -6785,7 +6795,8 @@ ORDER BY V.FOLIO, DA.ID;
             elif es_socios:
                 self.ds.actualizar_pago_socios(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_transferencia:
-                self.ds.actualizar_transferencia(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                # Para transferencias: rep=repartidor, conc=destinatario, concepto fijo
+                self.ds.actualizar_transferencia(registro_id, nuevo_rep, nuevo_conc, "Transferencia", nuevo_monto, nuevo_obs)
             elif es_prestamo:
                 self.ds.actualizar_prestamo(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_proveedor:
