@@ -964,9 +964,10 @@ class CorteCajeroManager:
     # FUNCIONES PRINCIPALES - CORTE COMPLETO
     # ══════════════════════════════════════════════════════════════════════════
     
-    def obtener_corte_por_turno(self, turno_id: int) -> CorteCajero:
+    def obtener_corte_rapido(self, turno_id: int) -> Optional[CorteCajero]:
         """
-        Obtiene el corte de caja completo de un turno específico.
+        VERSIÓN OPTIMIZADA: Obtiene el corte de caja en UNA SOLA consulta SQL.
+        Reduce de ~15 consultas a solo 2 (turno + movimientos).
         
         Args:
             turno_id: ID del turno
@@ -974,6 +975,165 @@ class CorteCajeroManager:
         Returns:
             Objeto CorteCajero con toda la información
         """
+        # CONSULTA 1: Obtener TODOS los datos del turno en una sola consulta
+        sql = f"""
+        SELECT 
+            T.ID,
+            T.INICIO_EN,
+            T.TERMINO_EN,
+            COALESCE(T.DINERO_INICIAL, 0) AS FONDO_CAJA,
+            COALESCE(T.VENTAS_EFECTIVO, 0) AS VENTAS_EFECTIVO,
+            COALESCE(T.ABONOS_EFECTIVO, 0) AS ABONOS_EFECTIVO,
+            COALESCE(T.VENTAS_TARJETA, 0) AS VENTAS_TARJETA,
+            COALESCE(T.VENTAS_CREDITO, 0) AS VENTAS_CREDITO,
+            COALESCE(T.VENTAS_VALES, 0) AS VENTAS_VALES,
+            COALESCE(T.DEVOLUCIONES_VENTAS_EFECTIVO, 0) AS DEV_EFECTIVO,
+            COALESCE(T.DEVOLUCIONES_VENTAS_CREDITO, 0) AS DEV_CREDITO,
+            COALESCE(T.DEVOLUCIONES_VENTAS_TARJETA, 0) AS DEV_TARJETA,
+            COALESCE(T.DEVOLUCIONES_VENTAS_VALES, 0) AS DEV_VALES,
+            COALESCE(T.ACUMULADO_GANANCIA, 0) AS GANANCIA,
+            (SELECT COALESCE(SUM(MONTO), 0) FROM CORTE_MOVIMIENTOS WHERE ID_TURNO = T.ID AND TIPO = 'Entrada') AS ENTRADAS,
+            (SELECT COALESCE(SUM(MONTO), 0) FROM CORTE_MOVIMIENTOS WHERE ID_TURNO = T.ID AND TIPO = 'Salida') AS SALIDAS
+        FROM TURNOS T
+        WHERE T.ID = {turno_id};
+        """
+        resultado, error = self._ejecutar_sql(sql)
+        
+        if error or not resultado:
+            return None
+        
+        # Parsear resultado
+        try:
+            lines = resultado.split('\n')
+            data_line = None
+            header_found = False
+            
+            for line in lines:
+                line_stripped = line.strip()
+                if not line_stripped or 'SQL>' in line_stripped:
+                    continue
+                if line_stripped.startswith('=') or line_stripped.startswith('-'):
+                    header_found = True
+                    continue
+                if 'ID' in line_stripped and 'FONDO_CAJA' in line_stripped:
+                    header_found = True
+                    continue
+                if header_found and line_stripped:
+                    data_line = line_stripped
+                    break
+            
+            if not data_line:
+                return None
+            
+            # Parsear los valores (de izquierda a derecha)
+            partes = data_line.split()
+            
+            def safe_float(val):
+                if val in ('<null>', 'null', 'NULL', '<NULL>'):
+                    return 0.0
+                try:
+                    return float(val.replace(',', ''))
+                except:
+                    return 0.0
+            
+            def safe_int(val):
+                if val in ('<null>', 'null', 'NULL', '<NULL>'):
+                    return 0
+                try:
+                    return int(val)
+                except:
+                    return 0
+            
+            # Campos en orden: ID, INICIO_EN, TERMINO_EN, FONDO_CAJA, VENTAS_EFECTIVO, 
+            # ABONOS_EFECTIVO, VENTAS_TARJETA, VENTAS_CREDITO, VENTAS_VALES,
+            # DEV_EFECTIVO, DEV_CREDITO, DEV_TARJETA, DEV_VALES, GANANCIA, ENTRADAS, SALIDAS
+            
+            # Los campos de fecha pueden tener espacios, así que parseamos desde el final
+            salidas = safe_float(partes[-1])
+            entradas = safe_float(partes[-2])
+            ganancia = safe_float(partes[-3])
+            dev_vales = safe_float(partes[-4])
+            dev_tarjeta = safe_float(partes[-5])
+            dev_credito = safe_float(partes[-6])
+            dev_efectivo = safe_float(partes[-7])
+            ventas_vales = safe_float(partes[-8])
+            ventas_credito = safe_float(partes[-9])
+            ventas_tarjeta = safe_float(partes[-10])
+            abonos_efectivo = safe_float(partes[-11])
+            ventas_efectivo = safe_float(partes[-12])
+            fondo_caja = safe_float(partes[-13])
+            
+            # Fechas pueden tener formato complejo, extraer solo la parte relevante
+            fecha_inicio = None
+            fecha_fin = None
+            for p in partes:
+                if '-' in p and len(p) == 10 and p[4] == '-':
+                    if fecha_inicio is None:
+                        fecha_inicio = p
+                    else:
+                        fecha_fin = p
+            
+            # Si VENTAS_CREDITO es 0, calcular desde VENTATICKETS (una consulta extra)
+            if ventas_credito == 0.0:
+                ventas_credito = self.obtener_ventas_credito_desde_ventatickets(turno_id)
+            
+            # Crear objetos
+            dinero_en_caja = DineroEnCaja(
+                fondo_de_caja=fondo_caja,
+                ventas_en_efectivo=ventas_efectivo,
+                abonos_en_efectivo=abonos_efectivo,
+                entradas=entradas,
+                salidas=salidas,
+                devoluciones_en_efectivo=dev_efectivo
+            )
+            
+            total_devoluciones = dev_efectivo + dev_credito + dev_tarjeta + dev_vales
+            
+            ventas = Ventas(
+                ventas_efectivo=ventas_efectivo,
+                ventas_tarjeta=ventas_tarjeta,
+                ventas_credito=ventas_credito,
+                ventas_vales=ventas_vales,
+                devoluciones_ventas=total_devoluciones,
+                devoluciones_por_forma_pago={
+                    'efectivo': dev_efectivo,
+                    'credito': dev_credito,
+                    'tarjeta': dev_tarjeta,
+                    'vales': dev_vales
+                }
+            )
+            
+            return CorteCajero(
+                turno_id=turno_id,
+                fecha_inicio=datetime.fromisoformat(fecha_inicio) if fecha_inicio else None,
+                fecha_fin=datetime.fromisoformat(fecha_fin) if fecha_fin else None,
+                dinero_en_caja=dinero_en_caja,
+                ventas=ventas,
+                ganancia=ganancia
+            )
+            
+        except Exception as e:
+            print(f"⚠️ Error parseando corte rápido: {e}")
+            # Fallback al método lento
+            return self.obtener_corte_por_turno(turno_id)
+    
+    def obtener_corte_por_turno(self, turno_id: int) -> CorteCajero:
+        """
+        Obtiene el corte de caja completo de un turno específico.
+        NOTA: Usar obtener_corte_rapido() para mejor rendimiento.
+        
+        Args:
+            turno_id: ID del turno
+            
+        Returns:
+            Objeto CorteCajero con toda la información
+        """
+        # Intentar primero el método rápido
+        corte_rapido = self.obtener_corte_rapido(turno_id)
+        if corte_rapido:
+            return corte_rapido
+        
+        # Fallback al método lento si falla
         # Obtener información del turno
         info = self.obtener_info_turno(turno_id)
         
@@ -1049,8 +1209,8 @@ class CorteCajeroManager:
     
     def obtener_corte_completo_por_fecha(self, fecha: str) -> Optional[CorteCajero]:
         """
-        Obtiene el corte de caja COMBINADO de TODOS los turnos de una fecha.
-        Suma los valores de todos los turnos del día.
+        VERSIÓN OPTIMIZADA: Obtiene el corte de caja COMBINADO de TODOS los turnos 
+        de una fecha en UNA SOLA consulta SQL.
         
         Args:
             fecha: Fecha en formato 'YYYY-MM-DD'
@@ -1058,6 +1218,172 @@ class CorteCajeroManager:
         Returns:
             Objeto CorteCajero con totales combinados o None si no hay turnos
         """
+        # CONSULTA ÚNICA: Sumar TODOS los turnos del día en una sola consulta
+        sql = f"""
+        SELECT 
+            COUNT(T.ID) AS NUM_TURNOS,
+            MIN(T.ID) AS PRIMER_TURNO,
+            MAX(T.ID) AS ULTIMO_TURNO,
+            MIN(T.INICIO_EN) AS FECHA_INICIO,
+            MAX(T.TERMINO_EN) AS FECHA_FIN,
+            SUM(COALESCE(T.DINERO_INICIAL, 0)) AS FONDO_CAJA,
+            SUM(COALESCE(T.VENTAS_EFECTIVO, 0)) AS VENTAS_EFECTIVO,
+            SUM(COALESCE(T.ABONOS_EFECTIVO, 0)) AS ABONOS_EFECTIVO,
+            SUM(COALESCE(T.VENTAS_TARJETA, 0)) AS VENTAS_TARJETA,
+            SUM(COALESCE(T.VENTAS_CREDITO, 0)) AS VENTAS_CREDITO,
+            SUM(COALESCE(T.VENTAS_VALES, 0)) AS VENTAS_VALES,
+            SUM(COALESCE(T.DEVOLUCIONES_VENTAS_EFECTIVO, 0)) AS DEV_EFECTIVO,
+            SUM(COALESCE(T.DEVOLUCIONES_VENTAS_CREDITO, 0)) AS DEV_CREDITO,
+            SUM(COALESCE(T.DEVOLUCIONES_VENTAS_TARJETA, 0)) AS DEV_TARJETA,
+            SUM(COALESCE(T.DEVOLUCIONES_VENTAS_VALES, 0)) AS DEV_VALES,
+            SUM(COALESCE(T.ACUMULADO_GANANCIA, 0)) AS GANANCIA
+        FROM TURNOS T
+        WHERE CAST(T.INICIO_EN AS DATE) = '{fecha}';
+        """
+        resultado, error = self._ejecutar_sql(sql)
+        
+        if error or not resultado:
+            return None
+        
+        # Parsear resultado
+        try:
+            lines = resultado.split('\n')
+            data_line = None
+            header_found = False
+            
+            for line in lines:
+                line_stripped = line.strip()
+                if not line_stripped or 'SQL>' in line_stripped:
+                    continue
+                if line_stripped.startswith('=') or line_stripped.startswith('-'):
+                    header_found = True
+                    continue
+                if 'NUM_TURNOS' in line_stripped:
+                    header_found = True
+                    continue
+                if header_found and line_stripped:
+                    data_line = line_stripped
+                    break
+            
+            if not data_line:
+                return None
+            
+            partes = data_line.split()
+            
+            def safe_float(val):
+                if val in ('<null>', 'null', 'NULL', '<NULL>'):
+                    return 0.0
+                try:
+                    return float(val.replace(',', ''))
+                except:
+                    return 0.0
+            
+            def safe_int(val):
+                if val in ('<null>', 'null', 'NULL', '<NULL>'):
+                    return 0
+                try:
+                    return int(val)
+                except:
+                    return 0
+            
+            # Parsear desde el final (más confiable)
+            ganancia = safe_float(partes[-1])
+            dev_vales = safe_float(partes[-2])
+            dev_tarjeta = safe_float(partes[-3])
+            dev_credito = safe_float(partes[-4])
+            dev_efectivo = safe_float(partes[-5])
+            ventas_vales = safe_float(partes[-6])
+            ventas_credito = safe_float(partes[-7])
+            ventas_tarjeta = safe_float(partes[-8])
+            abonos_efectivo = safe_float(partes[-9])
+            ventas_efectivo = safe_float(partes[-10])
+            fondo_caja = safe_float(partes[-11])
+            
+            num_turnos = safe_int(partes[0])
+            ultimo_turno = safe_int(partes[2]) if len(partes) > 2 else 0
+            
+            if num_turnos == 0:
+                return None
+            
+            # Obtener entradas y salidas combinadas
+            sql_mov = f"""
+            SELECT 
+                COALESCE(SUM(CASE WHEN M.TIPO = 'Entrada' THEN M.MONTO ELSE 0 END), 0) AS ENTRADAS,
+                COALESCE(SUM(CASE WHEN M.TIPO = 'Salida' THEN M.MONTO ELSE 0 END), 0) AS SALIDAS
+            FROM CORTE_MOVIMIENTOS M
+            INNER JOIN TURNOS T ON M.ID_TURNO = T.ID
+            WHERE CAST(T.INICIO_EN AS DATE) = '{fecha}';
+            """
+            res_mov, err_mov = self._ejecutar_sql(sql_mov)
+            
+            entradas = 0.0
+            salidas = 0.0
+            if not err_mov and res_mov:
+                for line in res_mov.split('\n'):
+                    line_stripped = line.strip()
+                    if line_stripped and not line_stripped.startswith('=') and 'ENTRADAS' not in line_stripped and 'SQL>' not in line_stripped:
+                        partes_mov = line_stripped.split()
+                        if len(partes_mov) >= 2:
+                            entradas = safe_float(partes_mov[0])
+                            salidas = safe_float(partes_mov[1])
+                            break
+            
+            # Fechas
+            fecha_inicio = None
+            fecha_fin = None
+            for p in partes:
+                if '-' in p and len(p) == 10 and p[4] == '-':
+                    if fecha_inicio is None:
+                        fecha_inicio = p
+                    else:
+                        fecha_fin = p
+            
+            # Si ventas_credito es 0, calcular desde VENTATICKETS
+            if ventas_credito == 0.0:
+                ventas_credito = self.obtener_ventas_credito_por_fecha(fecha)
+            
+            # Crear objetos
+            dinero_en_caja = DineroEnCaja(
+                fondo_de_caja=fondo_caja,
+                ventas_en_efectivo=ventas_efectivo,
+                abonos_en_efectivo=abonos_efectivo,
+                entradas=entradas,
+                salidas=salidas,
+                devoluciones_en_efectivo=dev_efectivo
+            )
+            
+            total_devoluciones = dev_efectivo + dev_credito + dev_tarjeta + dev_vales
+            
+            ventas = Ventas(
+                ventas_efectivo=ventas_efectivo,
+                ventas_tarjeta=ventas_tarjeta,
+                ventas_credito=ventas_credito,
+                ventas_vales=ventas_vales,
+                devoluciones_ventas=total_devoluciones,
+                devoluciones_por_forma_pago={
+                    'efectivo': dev_efectivo,
+                    'credito': dev_credito,
+                    'tarjeta': dev_tarjeta,
+                    'vales': dev_vales
+                }
+            )
+            
+            return CorteCajero(
+                turno_id=ultimo_turno,
+                fecha_inicio=datetime.fromisoformat(fecha_inicio) if fecha_inicio else None,
+                fecha_fin=datetime.fromisoformat(fecha_fin) if fecha_fin else None,
+                dinero_en_caja=dinero_en_caja,
+                ventas=ventas,
+                ganancia=ganancia
+            )
+            
+        except Exception as e:
+            print(f"⚠️ Error en corte combinado rápido: {e}")
+            # Fallback al método lento
+            return self._obtener_corte_completo_lento(fecha)
+    
+    def _obtener_corte_completo_lento(self, fecha: str) -> Optional[CorteCajero]:
+        """Versión lenta (fallback) que consulta turno por turno."""
         turnos = self.obtener_todos_turnos_por_fecha(fecha)
         if not turnos:
             return None
@@ -1100,7 +1426,6 @@ class CorteCajeroManager:
         for turno_id in turnos:
             corte = self.obtener_corte_por_turno(turno_id)
             if corte:
-                # Sumar dinero en caja
                 dinero_total.fondo_de_caja += corte.dinero_en_caja.fondo_de_caja
                 dinero_total.ventas_en_efectivo += corte.dinero_en_caja.ventas_en_efectivo
                 dinero_total.abonos_en_efectivo += corte.dinero_en_caja.abonos_en_efectivo
@@ -1108,34 +1433,28 @@ class CorteCajeroManager:
                 dinero_total.salidas += corte.dinero_en_caja.salidas
                 dinero_total.devoluciones_en_efectivo += corte.dinero_en_caja.devoluciones_en_efectivo
                 
-                # Sumar ventas
                 ventas_total.ventas_efectivo += corte.ventas.ventas_efectivo
                 ventas_total.ventas_tarjeta += corte.ventas.ventas_tarjeta
                 ventas_total.ventas_credito += corte.ventas.ventas_credito
                 ventas_total.ventas_vales += corte.ventas.ventas_vales
                 ventas_total.devoluciones_ventas += corte.ventas.devoluciones_ventas
                 
-                # Sumar devoluciones por forma de pago
                 if corte.ventas.devoluciones_por_forma_pago:
                     for forma, valor in corte.ventas.devoluciones_por_forma_pago.items():
                         if forma in devs_por_forma_pago:
                             devs_por_forma_pago[forma] += valor
                 
-                # Sumar ganancia
                 ganancia_total += corte.ganancia
                 
-                # Guardar primera y última fecha
                 if fecha_inicio is None and corte.fecha_inicio:
                     fecha_inicio = corte.fecha_inicio
                 if corte.fecha_fin:
                     fecha_fin = corte.fecha_fin
         
-        # Actualizar las devoluciones por forma de pago
         ventas_total.devoluciones_por_forma_pago = devs_por_forma_pago
         
-        # Crear corte combinado con todos los IDs de turnos concatenados
         return CorteCajero(
-            turno_id=turnos[-1],  # Usar el último turno como referencia
+            turno_id=turnos[-1],
             fecha_inicio=fecha_inicio,
             fecha_fin=fecha_fin,
             dinero_en_caja=dinero_total,
