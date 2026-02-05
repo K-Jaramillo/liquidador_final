@@ -288,20 +288,11 @@ class DataStore:
         """Elimina un gasto por índice o ID de SQLite."""
         self._ensure_gastos()
         if USE_SQLITE and isinstance(index_or_id, int):
-            # Buscar el gasto con ese ID
-            for i, g in enumerate(self.gastos):
-                if g.get('id') == index_or_id:
-                    db_local.eliminar_gasto(index_or_id)
-                    del self.gastos[i]
-                    self._notificar()
-                    return
-            # Si no se encontró por ID, intentar como índice
-            if 0 <= index_or_id < len(self.gastos):
-                gasto = self.gastos[index_or_id]
-                if 'id' in gasto:
-                    db_local.eliminar_gasto(gasto['id'])
-                del self.gastos[index_or_id]
-                self._notificar()
+            # Eliminar directamente de la BD por ID
+            db_local.eliminar_gasto(index_or_id)
+            # Sincronizar lista local
+            self.gastos = [g for g in self.gastos if g.get('id') != index_or_id]
+            self._notificar()
         elif 0 <= index_or_id < len(self.gastos):
             del self.gastos[index_or_id]
             self._notificar()
@@ -419,10 +410,10 @@ class DataStore:
             self._notificar()
 
     def actualizar_pago_proveedor(self, pago_id: int, proveedor: str, concepto: str, 
-                                   monto: float, repartidor: str = ''):
+                                   monto: float, repartidor: str = '', observaciones: str = ''):
         """Actualiza un pago a proveedor existente."""
         if USE_SQLITE:
-            db_local.actualizar_pago_proveedor(pago_id, proveedor, concepto, monto, repartidor)
+            db_local.actualizar_pago_proveedor(pago_id, proveedor, concepto, monto, repartidor, observaciones)
             self._notificar()
 
     def get_pagos_proveedores(self, repartidor: str = '') -> list:
@@ -440,10 +431,10 @@ class DataStore:
         return 0.0
 
     # --- actualizar gasto ---
-    def actualizar_gasto(self, gasto_id: int, repartidor: str, concepto: str, monto: float):
+    def actualizar_gasto(self, gasto_id: int, repartidor: str, concepto: str, monto: float, observaciones: str = ''):
         """Actualiza un gasto existente."""
         if USE_SQLITE:
-            db_local.actualizar_gasto(gasto_id, repartidor, concepto, monto)
+            db_local.actualizar_gasto(gasto_id, repartidor, concepto, monto, observaciones)
             self._notificar()
 
     # --- préstamos ---
@@ -459,6 +450,12 @@ class DataStore:
         """Elimina un préstamo."""
         if USE_SQLITE:
             db_local.eliminar_prestamo(prestamo_id)
+            self._notificar()
+
+    def actualizar_prestamo(self, prestamo_id: int, repartidor: str, concepto: str, monto: float, observaciones: str = ''):
+        """Actualiza un préstamo existente."""
+        if USE_SQLITE:
+            db_local.actualizar_prestamo(prestamo_id, repartidor, concepto, monto, observaciones)
             self._notificar()
 
     def get_prestamos(self, repartidor: str = '') -> list:
@@ -490,6 +487,12 @@ class DataStore:
             db_local.eliminar_pago_nomina(pago_id)
             self._notificar()
 
+    def actualizar_pago_nomina(self, pago_id: int, empleado: str, concepto: str, monto: float, observaciones: str = ''):
+        """Actualiza un pago de nómina existente."""
+        if USE_SQLITE:
+            db_local.actualizar_pago_nomina(pago_id, empleado, concepto, monto, observaciones)
+            self._notificar()
+
     def get_pagos_nomina(self) -> list:
         """Obtiene los pagos de nómina de la fecha actual."""
         if USE_SQLITE:
@@ -515,6 +518,12 @@ class DataStore:
         """Elimina un pago a socios."""
         if USE_SQLITE:
             db_local.eliminar_pago_socios(pago_id)
+            self._notificar()
+
+    def actualizar_pago_socios(self, pago_id: int, socio: str, concepto: str, monto: float, observaciones: str = ''):
+        """Actualiza un pago a socios existente."""
+        if USE_SQLITE:
+            db_local.actualizar_pago_socios(pago_id, socio, concepto, monto, observaciones)
             self._notificar()
 
     def get_pagos_socios(self) -> list:
@@ -1080,6 +1089,9 @@ class LiquidadorRepartidores:
         self.entry_buscar_global = ttk.Entry(fila2, textvariable=self.buscar_global_var, width=20)
         self.entry_buscar_global.pack(side=tk.LEFT, padx=(0, 3))
         self.buscar_global_var.trace_add("write", lambda *a: self._on_buscar_global())
+        # Enter en buscador -> saltar al listado
+        self.entry_buscar_global.bind("<Return>", self._saltar_al_listado)
+        self.entry_buscar_global.bind("<KP_Enter>", self._saltar_al_listado)
         ttk.Button(fila2, text="✕", width=2,
                    command=self._limpiar_buscar_global).pack(side=tk.LEFT)
         
@@ -1139,6 +1151,44 @@ class LiquidadorRepartidores:
         """Limpia el buscador global."""
         self.buscar_global_var.set("")
         self.entry_buscar_global.focus_set()
+    
+    def _enfocar_buscador_seleccionar(self, event=None):
+        """Enfoca el buscador y selecciona todo el texto (F10)."""
+        self.entry_buscar_global.focus_set()
+        self.entry_buscar_global.select_range(0, tk.END)
+        self.entry_buscar_global.icursor(tk.END)
+        return "break"
+    
+    def _saltar_al_listado(self, event=None):
+        """Salta al listado de facturas para asignar repartidor (Enter en buscador)."""
+        # Obtener la pestaña actual
+        tab_actual = self.notebook.index(self.notebook.select())
+        
+        if tab_actual == 0:  # Pestaña de Asignación
+            # Seleccionar el primer item si hay resultados
+            items = self.tree_asign.get_children()
+            if items:
+                self.tree_asign.focus_set()
+                self.tree_asign.selection_set(items[0])
+                self.tree_asign.focus(items[0])
+                self.tree_asign.see(items[0])
+        elif tab_actual == 1:  # Pestaña de Liquidación
+            if hasattr(self, 'tree_liq'):
+                items = self.tree_liq.get_children()
+                if items:
+                    self.tree_liq.focus_set()
+                    self.tree_liq.selection_set(items[0])
+                    self.tree_liq.focus(items[0])
+                    self.tree_liq.see(items[0])
+        elif tab_actual == 2:  # Pestaña de Descuentos
+            if hasattr(self, 'tree_descuentos'):
+                items = self.tree_descuentos.get_children()
+                if items:
+                    self.tree_descuentos.focus_set()
+                    self.tree_descuentos.selection_set(items[0])
+                    self.tree_descuentos.focus(items[0])
+                    self.tree_descuentos.see(items[0])
+        return "break"
 
     # ------------------------------------------------------------------
     # FILTRO REPARTIDOR GLOBAL: se ejecuta cuando cambia el repartidor
@@ -1319,8 +1369,8 @@ class LiquidadorRepartidores:
         # Variable para compatibilidad con buscador (usa el global)
         self.buscar_asign_var = self.buscar_global_var
         
-        # Binding global F10 para enfocar buscador
-        self.ventana.bind("<F10>", lambda e: self.entry_buscar_global.focus_set())
+        # Binding global F10 para enfocar buscador y seleccionar todo el texto
+        self.ventana.bind("<F10>", self._enfocar_buscador_seleccionar)
         # Binding global Ctrl+S para guardar cambios pendientes
         self.ventana.bind("<Control-s>", lambda e: self._guardar_cambios_pendientes())
         self.ventana.bind("<Control-S>", lambda e: self._guardar_cambios_pendientes())
@@ -2189,14 +2239,9 @@ ORDER BY V.FOLIO, DA.ID;
         
         reps = self.ds.get_repartidores()
         
-        # Actualizar combo de filtros con los repartidores disponibles
+        # Actualizar combo de filtros (sin repartidores, solo estados)
         filtros_base = ["Todos", "Sin Repartidor", "Canceladas", "Crédito"]
-        if reps:
-            # Agregar separador y repartidores
-            filtros_completos = filtros_base + ["─────────"] + sorted(reps)
-        else:
-            filtros_completos = filtros_base
-        self.combo_filtro_estado['values'] = filtros_completos
+        self.combo_filtro_estado['values'] = filtros_base
         
         # Actualizar labels del resumen
         self.lbl_total_facturas_asign.config(text=str(total))
@@ -2246,8 +2291,12 @@ ORDER BY V.FOLIO, DA.ID;
         
         # Obtener devoluciones parciales por folio para esta fecha
         dev_parciales_por_folio = {}
+        creditos_punteados_folios = set()
         if USE_SQLITE and self.ds.fecha:
             dev_parciales_por_folio = db_local.obtener_devoluciones_parciales_por_folio_fecha(self.ds.fecha)
+            # Obtener créditos punteados
+            creditos_punteados = db_local.obtener_creditos_punteados_fecha(self.ds.fecha)
+            creditos_punteados_folios = {c['folio'] for c in creditos_punteados}
         
         # Variables para resumen del filtro
         facturas_mostradas = 0
@@ -2263,6 +2312,7 @@ ORDER BY V.FOLIO, DA.ID;
             # Aplicar filtro de estado
             cancelada = v.get('cancelada', False)
             es_credito = v.get('es_credito', False)
+            es_credito_punteado = folio in creditos_punteados_folios
             cancelada_otro_dia = v.get('cancelada_otro_dia', False)
             
             # Usar repartidor de cambios pendientes si existe
@@ -2286,7 +2336,8 @@ ORDER BY V.FOLIO, DA.ID;
                 if not (cancelada or cancelada_otro_dia):
                     continue
             elif estado_filtro == "Crédito":
-                if not es_credito:
+                # Incluir créditos originales Y créditos punteados
+                if not (es_credito or es_credito_punteado):
                     continue
             elif estado_filtro != "Todos":
                 # Es un nombre de repartidor específico (compatibilidad)
@@ -2983,10 +3034,23 @@ ORDER BY V.FOLIO, DA.ID;
         # Separador
         ttk.Separator(col3, orient="horizontal").grid(row=6, column=0, columnspan=2, sticky="ew", pady=3)
         
+        # Conteo de Dinero (copia del valor del módulo conteo de dinero) - DEBAJO DE TOTAL EFECTIVO CAJA
+        ttk.Label(col3, text="💵 Conteo de Dinero:", font=("Segoe UI", 9, "bold")).grid(row=7, column=0, sticky=tk.W)
+        self.lbl_conteo_dinero_cuadre = ttk.Label(col3, text="$0", font=("Segoe UI", 10, "bold"), foreground="#1565c0")
+        self.lbl_conteo_dinero_cuadre.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
+        
+        # Diferencia Final (Conteo - Efectivo)
+        ttk.Label(col3, text="📊 Diferencia Final:", font=("Segoe UI", 9, "bold")).grid(row=8, column=0, sticky=tk.W)
+        self.lbl_diferencia_cuadre = ttk.Label(col3, text="$0", font=("Segoe UI", 10, "bold"), foreground="#9e9e9e")
+        self.lbl_diferencia_cuadre.grid(row=8, column=1, sticky=tk.E, padx=(10, 0))
+        
+        # Separador
+        ttk.Separator(col3, orient="horizontal").grid(row=9, column=0, columnspan=2, sticky="ew", pady=3)
+        
         # Total Facturadas a Crédito (desde Firebird)
-        ttk.Label(col3, text="Total a Crédito (FB):").grid(row=7, column=0, sticky=tk.W)
+        ttk.Label(col3, text="Total a Crédito (FB):").grid(row=10, column=0, sticky=tk.W)
         self.lbl_total_credito = ttk.Label(col3, text="$0", font=("Segoe UI", 9, "bold"), foreground="#f57c00")
-        self.lbl_total_credito.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_total_credito.grid(row=10, column=1, sticky=tk.E, padx=(10, 0))
 
         # ═══════════════════════════════════════════════════════════════════════
         # COLUMNA 3: RESULTADO FINAL
@@ -3722,6 +3786,22 @@ ORDER BY V.FOLIO, DA.ID;
         elif filtro and filtro != "(Todos)":
             ventas = [v for v in ventas if v['repartidor'] == filtro]
         
+        # Obtener créditos punteados para el filtro de estado
+        creditos_punteados_folios_filtro = set()
+        if USE_SQLITE and self.ds.fecha:
+            creditos_punteados = db_local.obtener_creditos_punteados_fecha(self.ds.fecha)
+            creditos_punteados_folios_filtro = {c['folio'] for c in creditos_punteados}
+        
+        # Aplicar filtro de estado (Crédito, Canceladas, Sin Repartidor, Todos)
+        estado_filtro = self.filtro_estado_var.get() if hasattr(self, 'filtro_estado_var') else "Todos"
+        if estado_filtro == "Sin Repartidor":
+            ventas = [v for v in ventas if not v['repartidor'] or v['repartidor'].strip() == '']
+        elif estado_filtro == "Canceladas":
+            ventas = [v for v in ventas if v.get('cancelada', False) or v.get('cancelada_otro_dia', False)]
+        elif estado_filtro == "Crédito":
+            # Incluir créditos originales Y créditos punteados
+            ventas = [v for v in ventas if v.get('es_credito', False) or v['folio'] in creditos_punteados_folios_filtro]
+        
         # Aplicar filtro de búsqueda global
         texto_buscar = self.buscar_global_var.get().strip().lower() if hasattr(self, 'buscar_global_var') else ""
         if texto_buscar:
@@ -3969,15 +4049,43 @@ ORDER BY V.FOLIO, DA.ID;
             except (ValueError, AttributeError):
                 total_dinero_caja = 0
         self.lbl_total_dinero_cuadre.config(text=f"${total_dinero_caja:,.2f}")
-        self.lbl_total_desc_cuadre.config(text=f"${total_descuentos_col2:,.2f}")
-        self.lbl_total_creditos_punteados.config(text=f"${total_creditos_punteados:,.2f}")
+        
+        # Para CUADRE GENERAL: calcular Total Descuentos de TODOS (sin filtro de repartidor)
+        total_ajustes_general = self.ds.get_total_ajustes('')
+        total_gastos_general = self.ds.get_total_gastos_repartidores('')
+        total_gastos_cajero_general = self.ds.get_total_gastos_cajero('')
+        total_pago_proveedores_general = self.ds.get_total_pagos_proveedores('')
+        total_prestamos_general = self.ds.get_total_prestamos('')
+        total_pago_nomina_general = self.ds.get_total_pagos_nomina()
+        total_pago_socios_general = self.ds.get_total_pagos_socios()
+        
+        total_descuentos_cuadre_general = (total_ajustes_general + total_gastos_general + 
+                                           total_gastos_cajero_general + total_pago_proveedores_general + 
+                                           total_prestamos_general + total_pago_nomina_general + 
+                                           total_pago_socios_general)
+        
+        # Créditos punteados general (sin filtro)
+        total_creditos_punteados_general = 0
+        if USE_SQLITE and self.ds.fecha:
+            total_creditos_punteados_general = db_local.obtener_total_creditos_punteados(self.ds.fecha)
+        
+        self.lbl_total_desc_cuadre.config(text=f"${total_descuentos_cuadre_general:,.2f}")
+        self.lbl_total_creditos_punteados.config(text=f"${total_creditos_punteados_general:,.2f}")
         # Total Efectivo Caja = Total Dinero Caja - Total Descuentos - Créditos Punteados
-        total_efectivo_caja = total_dinero_caja - total_descuentos_col2 - total_creditos_punteados
+        total_efectivo_caja = total_dinero_caja - total_descuentos_cuadre_general - total_creditos_punteados_general
         self.lbl_total_efectivo_caja.config(text=f"${total_efectivo_caja:,.2f}",
                                              foreground="#2e7d32" if total_efectivo_caja >= 0 else "#c62828")
         self.lbl_total_credito.config(text=f"${total_credito:,.2f}")
         
-        # COLUMNA 3: RESULTADO FINAL
+        # CONTEO DE DINERO Y DIFERENCIA EN CUADRE GENERAL
+        # Obtener total de conteo de dinero para el cuadre (SIN filtro, todos los repartidores)
+        total_conteo_cuadre = self.ds.get_total_dinero('')  # Sin filtro para obtener el total general
+        self.lbl_conteo_dinero_cuadre.config(text=f"${total_conteo_cuadre:,.2f}")
+        
+        # La diferencia se calculará después cuando se cargue el corte cajero
+        # porque en este punto el TOTAL EFECTIVO CAJA aún no tiene el valor correcto
+        
+        # COLUMNA 3: CUADRE REPARTIDOR
         # Obtener total de conteo de dinero
         filtro_dinero = filtro if filtro and filtro not in ("(Todos)", "(Sin Asignar)") else ''
         total_conteo_dinero = self.ds.get_total_dinero(filtro_dinero)
@@ -4201,9 +4309,27 @@ ORDER BY V.FOLIO, DA.ID;
                 total_efectivo_caja = total_dinero_caja - total_descuentos - total_creditos_punteados
                 self.lbl_total_efectivo_caja.config(text=f"${total_efectivo_caja:,.2f}",
                                                      foreground="#2e7d32" if total_efectivo_caja >= 0 else "#c62828")
-                self.lbl_total_efectivo_caja_resultado.config(text=f"${total_efectivo_caja:,.2f}",
-                                                               foreground="#2e7d32" if total_efectivo_caja >= 0 else "#c62828")
+                
+                # NUEVA LÓGICA DE DIFERENCIA FINAL
+                # Leer conteo mostrado
+                t_conteo = self.lbl_conteo_dinero_cuadre.cget("text")
+                val_conteo = float(t_conteo.replace("$", "").replace(",", "").replace("✓", "").strip()) if t_conteo and t_conteo != "$0" else 0.0
+                
+                # Si el conteo está en 0, obtenerlo del datastore
+                if val_conteo == 0:
+                    val_conteo = self.ds.get_total_dinero('')
+                
+                # Diferencia = Conteo de Dinero - TOTAL EFECTIVO CAJA
+                diferencia_final = val_conteo - total_efectivo_caja
+                
+                if abs(diferencia_final) < 0.01:
+                    self.lbl_diferencia_cuadre.config(text="$0.00 ✓", foreground="#2e7d32")
+                elif diferencia_final > 0:
+                    self.lbl_diferencia_cuadre.config(text=f"+${diferencia_final:,.2f}", foreground="#1565c0")
+                else:
+                    self.lbl_diferencia_cuadre.config(text=f"-${abs(diferencia_final):,.2f}", foreground="#c62828")
             except (ValueError, AttributeError):
+                pass
                 pass
             
             # --- ACTUALIZAR LABELS DE VENTAS (Liquidación) ---
@@ -4392,8 +4518,24 @@ ORDER BY V.FOLIO, DA.ID;
                 total_efectivo_caja = total_dinero_caja - total_descuentos - total_creditos_punteados
                 self.lbl_total_efectivo_caja.config(text=f"${total_efectivo_caja:,.2f}",
                                                      foreground="#2e7d32" if total_efectivo_caja >= 0 else "#c62828")
-                self.lbl_total_efectivo_caja_resultado.config(text=f"${total_efectivo_caja:,.2f}",
-                                                               foreground="#2e7d32" if total_efectivo_caja >= 0 else "#c62828")
+                
+                # NUEVA LÓGICA DE DIFERENCIA FINAL
+                t_conteo = self.lbl_conteo_dinero_cuadre.cget("text")
+                val_conteo = float(t_conteo.replace("$", "").replace(",", "").replace("✓", "").strip()) if t_conteo and t_conteo != "$0" else 0.0
+                
+                # Si el conteo está en 0, obtenerlo del datastore
+                if val_conteo == 0:
+                    val_conteo = self.ds.get_total_dinero('')
+                
+                # Diferencia = Conteo de Dinero - TOTAL EFECTIVO CAJA
+                diferencia_final = val_conteo - total_efectivo_caja
+                
+                if abs(diferencia_final) < 0.01:
+                    self.lbl_diferencia_cuadre.config(text="$0.00 ✓", foreground="#2e7d32")
+                elif diferencia_final > 0:
+                    self.lbl_diferencia_cuadre.config(text=f"+${diferencia_final:,.2f}", foreground="#1565c0")
+                else:
+                    self.lbl_diferencia_cuadre.config(text=f"-${abs(diferencia_final):,.2f}", foreground="#c62828")
             except (ValueError, AttributeError):
                 pass
             
@@ -5844,30 +5986,18 @@ ORDER BY V.FOLIO, DA.ID;
                 messagebox.showwarning("Advertencia", "Complete todos los campos", parent=dialog)
                 return
             
-            # Eliminar registro anterior
+            # Actualizar registro existente (sin eliminar/crear para evitar duplicados)
             if es_nomina:
-                self.ds.eliminar_pago_nomina(registro_id)
+                self.ds.actualizar_pago_nomina(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_socios:
-                self.ds.eliminar_pago_socios(registro_id)
+                self.ds.actualizar_pago_socios(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_prestamo:
-                self.ds.eliminar_prestamo(registro_id)
+                self.ds.actualizar_prestamo(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_proveedor:
-                self.ds.eliminar_pago_proveedor(registro_id)
+                self.ds.actualizar_pago_proveedor(registro_id, nuevo_conc, f"Pago por {nuevo_rep}", 
+                                                   nuevo_monto, nuevo_rep, nuevo_obs)
             else:
-                self.ds.eliminar_gasto(registro_id)
-            
-            # Crear nuevo registro según el tipo seleccionado
-            if nuevo_tipo == "GASTO":
-                self.ds.agregar_gasto(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
-            elif nuevo_tipo == "PAGO PROVEEDOR":
-                self.ds.agregar_pago_proveedor(proveedor=nuevo_conc, concepto=f"Pago por {nuevo_rep}", 
-                                               monto=nuevo_monto, repartidor=nuevo_rep, observaciones=nuevo_obs)
-            elif nuevo_tipo in ("PAGO NOMINA", "PAGO NÓMINA", "NOMINA", "NÓMINA"):
-                self.ds.agregar_pago_nomina(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
-            elif nuevo_tipo in ("SOCIOS", "PAGO SOCIOS"):
-                self.ds.agregar_pago_socios(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
-            else:  # PRÉSTAMO
-                self.ds.agregar_prestamo(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                self.ds.actualizar_gasto(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             
             dialog.destroy()
             self._refrescar_tab_gastos()

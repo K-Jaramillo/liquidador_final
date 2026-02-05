@@ -213,10 +213,16 @@ def init_database():
             repartidor TEXT NOT NULL,
             concepto TEXT NOT NULL,
             monto REAL NOT NULL DEFAULT 0,
+            observaciones TEXT DEFAULT '',
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Agregar columna observaciones si no existe (para bases de datos existentes)
+    try:
+        cursor.execute('ALTER TABLE gastos ADD COLUMN observaciones TEXT DEFAULT ""')
+    except:
+        pass  # La columna ya existe
     # ══════════════════════════════════════════════════════════════════
     # TABLA: CONTEO_DINERO
     # Guarda el conteo de dinero por repartidor y fecha
@@ -978,16 +984,16 @@ def eliminar_gasto(gasto_id: int) -> bool:
         return False
 
 
-def actualizar_gasto(gasto_id: int, repartidor: str, concepto: str, monto: float) -> bool:
+def actualizar_gasto(gasto_id: int, repartidor: str, concepto: str, monto: float, observaciones: str = '') -> bool:
     """Actualiza un gasto existente."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE gastos 
-            SET repartidor = ?, concepto = ?, monto = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            SET repartidor = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (repartidor, concepto, monto, gasto_id))
+        ''', (repartidor, concepto, monto, observaciones, gasto_id))
         conn.commit()
         conn.close()
         return True
@@ -1660,17 +1666,17 @@ def eliminar_pago_proveedor(pago_id: int) -> bool:
 
 
 def actualizar_pago_proveedor(pago_id: int, proveedor: str, concepto: str, 
-                               monto: float, repartidor: str = '') -> bool:
+                               monto: float, repartidor: str = '', observaciones: str = '') -> bool:
     """Actualiza un pago a proveedor existente."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE pago_proveedores 
-            SET proveedor = ?, concepto = ?, monto = ?, repartidor = ?, 
+            SET proveedor = ?, concepto = ?, monto = ?, repartidor = ?, observaciones = ?,
                 fecha_modificacion = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (proveedor, concepto, monto, repartidor, pago_id))
+        ''', (proveedor, concepto, monto, repartidor, observaciones, pago_id))
         conn.commit()
         conn.close()
         return True
@@ -1771,6 +1777,24 @@ def eliminar_prestamo(prestamo_id: int) -> bool:
         return True
     except Exception as e:
         print(f"Error eliminando préstamo: {e}")
+        return False
+
+
+def actualizar_prestamo(prestamo_id: int, repartidor: str, concepto: str, monto: float, observaciones: str = '') -> bool:
+    """Actualiza un préstamo existente."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE prestamos 
+            SET repartidor = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (repartidor, concepto, monto, observaciones, prestamo_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando préstamo: {e}")
         return False
 
 
@@ -2112,16 +2136,16 @@ def eliminar_pago_nomina(pago_id: int) -> bool:
         return False
 
 
-def actualizar_pago_nomina(pago_id: int, empleado: str, concepto: str, monto: float) -> bool:
+def actualizar_pago_nomina(pago_id: int, empleado: str, concepto: str, monto: float, observaciones: str = '') -> bool:
     """Actualiza un pago de nómina existente."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE pago_nomina 
-            SET empleado = ?, concepto = ?, monto = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            SET empleado = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (empleado, concepto, monto, pago_id))
+        ''', (empleado, concepto, monto, observaciones, pago_id))
         conn.commit()
         conn.close()
         return True
@@ -2194,16 +2218,16 @@ def eliminar_pago_socios(pago_id: int) -> bool:
         return False
 
 
-def actualizar_pago_socios(pago_id: int, socio: str, concepto: str, monto: float) -> bool:
+def actualizar_pago_socios(pago_id: int, socio: str, concepto: str, monto: float, observaciones: str = '') -> bool:
     """Actualiza un pago a socios existente."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE pago_socios 
-            SET socio = ?, concepto = ?, monto = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            SET socio = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (socio, concepto, monto, pago_id))
+        ''', (socio, concepto, monto, observaciones, pago_id))
         conn.commit()
         conn.close()
         return True
