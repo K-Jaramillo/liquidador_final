@@ -538,6 +538,39 @@ class DataStore:
             return db_local.obtener_total_pagos_socios_fecha(self.fecha)
         return 0.0
 
+    # --- transferencias ---
+    def agregar_transferencia(self, destinatario: str, concepto: str, monto: float, observaciones: str = ''):
+        """Agrega una transferencia y la persiste en SQLite."""
+        if USE_SQLITE:
+            transferencia_id = db_local.agregar_transferencia(self.fecha, destinatario, concepto, monto, observaciones)
+            self._notificar()
+            return transferencia_id
+        return -1
+
+    def eliminar_transferencia(self, transferencia_id: int):
+        """Elimina una transferencia."""
+        if USE_SQLITE:
+            db_local.eliminar_transferencia(transferencia_id)
+            self._notificar()
+
+    def actualizar_transferencia(self, transferencia_id: int, destinatario: str, concepto: str, monto: float, observaciones: str = ''):
+        """Actualiza una transferencia existente."""
+        if USE_SQLITE:
+            db_local.actualizar_transferencia(transferencia_id, destinatario, concepto, monto, observaciones)
+            self._notificar()
+
+    def get_transferencias(self) -> list:
+        """Obtiene las transferencias de la fecha actual."""
+        if USE_SQLITE:
+            return db_local.obtener_transferencias_fecha(self.fecha)
+        return []
+
+    def get_total_transferencias(self) -> float:
+        """Retorna el total de transferencias."""
+        if USE_SQLITE:
+            return db_local.obtener_total_transferencias_fecha(self.fecha)
+        return 0.0
+
     # --- conceptos de gastos ---
     def get_conceptos_gastos(self) -> list:
         """Obtiene la lista de conceptos guardados."""
@@ -2991,13 +3024,18 @@ ORDER BY V.FOLIO, DA.ID;
         self.lbl_total_socios_desc = ttk.Label(col2, text="$0", font=("Segoe UI", 9, "bold"), foreground="#ffab91")
         self.lbl_total_socios_desc.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
         
-        # Separador
-        ttk.Separator(col2, orient="horizontal").grid(row=8, column=0, columnspan=2, sticky="ew", pady=3)
+        # 8. Transferencias
+        ttk.Label(col2, text="(-) Transferencias:", foreground="#81d4fa").grid(row=8, column=0, sticky=tk.W)
+        self.lbl_total_transferencias_desc = ttk.Label(col2, text="$0", font=("Segoe UI", 9, "bold"), foreground="#81d4fa")
+        self.lbl_total_transferencias_desc.grid(row=8, column=1, sticky=tk.E, padx=(10, 0))
         
-        # 8. Total Descuentos (suma de los anteriores)
-        ttk.Label(col2, text="= Total Descuentos:", font=("Segoe UI", 9, "bold"), foreground="#ff8a80").grid(row=9, column=0, sticky=tk.W)
+        # Separador
+        ttk.Separator(col2, orient="horizontal").grid(row=9, column=0, columnspan=2, sticky="ew", pady=3)
+        
+        # 9. Total Descuentos (suma de los anteriores)
+        ttk.Label(col2, text="= Total Descuentos:", font=("Segoe UI", 9, "bold"), foreground="#ff8a80").grid(row=10, column=0, sticky=tk.W)
         self.lbl_total_devoluciones = ttk.Label(col2, text="$0", font=("Segoe UI", 10, "bold"), foreground="#ff8a80")
-        self.lbl_total_devoluciones.grid(row=9, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_total_devoluciones.grid(row=10, column=1, sticky=tk.E, padx=(10, 0))
 
         # ═══════════════════════════════════════════════════════════════════════
         # COLUMNA 2: CUADRE GENERAL
@@ -4013,6 +4051,9 @@ ORDER BY V.FOLIO, DA.ID;
         # 17. Pagos a Socios (desde SQLite)
         total_pago_socios = self.ds.get_total_pagos_socios()
         
+        # 18. Transferencias (desde SQLite)
+        total_transferencias = self.ds.get_total_transferencias()
+        
         # ═══════════════════════════════════════════════════════════════════════
         # CÁLCULOS FINALES
         # ═══════════════════════════════════════════════════════════════════════
@@ -4020,8 +4061,8 @@ ORDER BY V.FOLIO, DA.ID;
         # Total Después de Ajustes = Efectivo - Ajustes de Precios  
         total_despues_ajustes = total_efectivo - total_ajustes
         
-        # NETO A ENTREGAR = Total Después Ajustes + Ingresos - Gastos - Gastos Cajero - Pago Proveedores - Préstamos - Nómina - Socios - Salidas
-        neto = total_despues_ajustes + total_ingresos - total_gastos - total_gastos_cajero - total_pago_proveedores - total_prestamos - total_pago_nomina - total_pago_socios - total_salidas
+        # NETO A ENTREGAR = Total Después Ajustes + Ingresos - Gastos - Gastos Cajero - Pago Proveedores - Préstamos - Nómina - Socios - Transferencias - Salidas
+        neto = total_despues_ajustes + total_ingresos - total_gastos - total_gastos_cajero - total_pago_proveedores - total_prestamos - total_pago_nomina - total_pago_socios - total_transferencias - total_salidas
 
         # ═══════════════════════════════════════════════════════════════════════
         # ACTUALIZAR LABELS
@@ -4035,8 +4076,9 @@ ORDER BY V.FOLIO, DA.ID;
         self.lbl_total_prestamos.config(text=f"${total_prestamos:,.2f}")  # Préstamos
         self.lbl_total_nomina_desc.config(text=f"${total_pago_nomina:,.2f}")  # Nómina
         self.lbl_total_socios_desc.config(text=f"${total_pago_socios:,.2f}")  # Socios
-        # Total Descuentos = Ajustes + Gastos + Gastos Cajero + Proveedores + Préstamos + Nómina + Socios
-        total_descuentos_col2 = total_ajustes + total_gastos + total_gastos_cajero + total_pago_proveedores + total_prestamos + total_pago_nomina + total_pago_socios
+        self.lbl_total_transferencias_desc.config(text=f"${total_transferencias:,.2f}")  # Transferencias
+        # Total Descuentos = Ajustes + Gastos + Gastos Cajero + Proveedores + Préstamos + Nómina + Socios + Transferencias
+        total_descuentos_col2 = total_ajustes + total_gastos + total_gastos_cajero + total_pago_proveedores + total_prestamos + total_pago_nomina + total_pago_socios + total_transferencias
         self.lbl_total_devoluciones.config(text=f"${total_descuentos_col2:,.2f}")
         
         # COLUMNA 2: CUADRE GENERAL
@@ -4058,11 +4100,12 @@ ORDER BY V.FOLIO, DA.ID;
         total_prestamos_general = self.ds.get_total_prestamos('')
         total_pago_nomina_general = self.ds.get_total_pagos_nomina()
         total_pago_socios_general = self.ds.get_total_pagos_socios()
+        total_transferencias_general = self.ds.get_total_transferencias()
         
         total_descuentos_cuadre_general = (total_ajustes_general + total_gastos_general + 
                                            total_gastos_cajero_general + total_pago_proveedores_general + 
                                            total_prestamos_general + total_pago_nomina_general + 
-                                           total_pago_socios_general)
+                                           total_pago_socios_general + total_transferencias_general)
         
         # Créditos punteados general (sin filtro)
         total_creditos_punteados_general = 0
@@ -5558,11 +5601,17 @@ ORDER BY V.FOLIO, DA.ID;
         self.lbl_total_socios_gastos = ttk.Label(frame_total_g, text="$0.00",
                                                   font=("Segoe UI", 12, "bold"), foreground="#e64a19")
         self.lbl_total_socios_gastos.pack(side=tk.LEFT, padx=8)
+        
+        ttk.Label(frame_total_g, text="    |    TRANSFERENCIAS:",
+                  font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
+        self.lbl_total_transferencias_gastos = ttk.Label(frame_total_g, text="$0.00",
+                                                  font=("Segoe UI", 12, "bold"), foreground="#0288d1")
+        self.lbl_total_transferencias_gastos.pack(side=tk.LEFT, padx=8)
 
     def _cargar_tipos_gasto(self):
         """Carga los tipos de gasto en el combobox."""
         # Solo los tipos que aparecen en DESCUENTOS Y AJUSTES
-        tipos = ["GASTO", "GASTO CAJERO", "PAGO PROVEEDOR", "PRÉSTAMO", "NÓMINA", "SOCIOS"]
+        tipos = ["GASTO", "GASTO CAJERO", "PAGO PROVEEDOR", "PRÉSTAMO", "NÓMINA", "SOCIOS", "TRANSFERENCIA"]
         self.gasto_tipo_combo['values'] = tipos
         self.gasto_tipo_combo.config(state="readonly")  # No permitir tipos personalizados
     
@@ -5772,6 +5821,19 @@ ORDER BY V.FOLIO, DA.ID;
                                             f"${ps.get('monto', 0):,.2f}",
                                             ps.get('observaciones', '') or ''),
                                     tags=("socios",))
+        
+        # Obtener transferencias (desde tabla dedicada)
+        transferencias = self.ds.get_transferencias()
+        for tr in transferencias:
+            self.tree_gastos.insert("", tk.END,
+                                    iid=f"transf_{tr.get('id', 0)}",
+                                    values=(tr.get('id', ''),
+                                            "💸 Transferencia",
+                                            tr.get('destinatario', ''),
+                                            tr.get('concepto', ''),
+                                            f"${tr.get('monto', 0):,.2f}",
+                                            tr.get('observaciones', '') or ''),
+                                    tags=("transferencia",))
 
         # totales desglosados por repartidor (solo gastos)
         reps_activos = sorted({g['repartidor'] for g in gastos})
@@ -5801,6 +5863,10 @@ ORDER BY V.FOLIO, DA.ID;
         # Total socios
         total_socios = self.ds.get_total_pagos_socios()
         self.lbl_total_socios_gastos.config(text=f"${total_socios:,.2f}")
+        
+        # Total transferencias
+        total_transferencias = self.ds.get_total_transferencias()
+        self.lbl_total_transferencias_gastos.config(text=f"${total_transferencias:,.2f}")
 
     # --- añadir un gasto nuevo ---
     def _añadir_gasto(self):
@@ -5834,6 +5900,9 @@ ORDER BY V.FOLIO, DA.ID;
         elif tipo == "SOCIOS":
             # Guardar en tabla dedicada pago_socios
             self.ds.agregar_pago_socios(rep, concepto, monto, "")
+        elif tipo == "TRANSFERENCIA":
+            # Guardar en tabla dedicada transferencias
+            self.ds.agregar_transferencia(rep, concepto, monto, "")
         elif tipo == "GASTO CAJERO":
             # Gasto de cajero
             self.ds.agregar_gasto("CAJERO", concepto, monto, "")
@@ -5866,12 +5935,13 @@ ORDER BY V.FOLIO, DA.ID;
         es_prestamo = item_id.startswith("prest_")
         es_nomina = item_id.startswith("nomina_")
         es_socios = item_id.startswith("socios_")
+        es_transferencia = item_id.startswith("transf_")
         registro_id = int(values[0])
         
-        self._mostrar_dialogo_editar_gasto(item_id, registro_id, es_proveedor, es_prestamo, es_nomina, es_socios, values)
+        self._mostrar_dialogo_editar_gasto(item_id, registro_id, es_proveedor, es_prestamo, es_nomina, es_socios, es_transferencia, values)
     
-    def _mostrar_dialogo_editar_gasto(self, item_id, registro_id, es_proveedor, es_prestamo, es_nomina, es_socios, values):
-        """Muestra un diálogo para editar un gasto, pago a proveedor, préstamo, nómina o socios."""
+    def _mostrar_dialogo_editar_gasto(self, item_id, registro_id, es_proveedor, es_prestamo, es_nomina, es_socios, es_transferencia, values):
+        """Muestra un diálogo para editar un gasto, pago a proveedor, préstamo, nómina, socios o transferencia."""
         dialog = tk.Toplevel(self.ventana)
         dialog.title("✏️ Editar Registro")
         dialog.geometry("500x380")
@@ -5902,6 +5972,9 @@ ORDER BY V.FOLIO, DA.ID;
         elif es_socios:
             tipo_texto = "🤝 PAGO SOCIOS"
             tipo_inicial = "SOCIOS"
+        elif es_transferencia:
+            tipo_texto = "💸 TRANSFERENCIA"
+            tipo_inicial = "TRANSFERENCIA"
         elif es_prestamo:
             tipo_texto = "💵 PRÉSTAMO"
             tipo_inicial = "PRÉSTAMO"
@@ -5914,6 +5987,9 @@ ORDER BY V.FOLIO, DA.ID;
         elif 'SOCIO' in concepto_upper:
             tipo_texto = "🤝 PAGO SOCIOS"
             tipo_inicial = "SOCIOS"
+        elif 'TRANSFERENCIA' in concepto_upper:
+            tipo_texto = "💸 TRANSFERENCIA"
+            tipo_inicial = "TRANSFERENCIA"
         else:
             tipo_texto = "🔧 GASTO"
             tipo_inicial = "GASTO"
@@ -5991,6 +6067,8 @@ ORDER BY V.FOLIO, DA.ID;
                 self.ds.actualizar_pago_nomina(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_socios:
                 self.ds.actualizar_pago_socios(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+            elif es_transferencia:
+                self.ds.actualizar_transferencia(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_prestamo:
                 self.ds.actualizar_prestamo(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             elif es_proveedor:
@@ -6009,6 +6087,8 @@ ORDER BY V.FOLIO, DA.ID;
                     self.ds.eliminar_pago_nomina(registro_id)
                 elif es_socios:
                     self.ds.eliminar_pago_socios(registro_id)
+                elif es_transferencia:
+                    self.ds.eliminar_transferencia(registro_id)
                 elif es_prestamo:
                     self.ds.eliminar_prestamo(registro_id)
                 elif es_proveedor:
@@ -6055,11 +6135,12 @@ ORDER BY V.FOLIO, DA.ID;
                 es_prestamo = row.startswith("prest_")
                 es_nomina = row.startswith("nomina_")
                 es_socios = row.startswith("socios_")
+                es_transferencia = row.startswith("transf_")
                 registro_id = int(values[0])
                 
                 menu.add_command(
                     label="🗑️ Eliminar registro",
-                    command=lambda: self._eliminar_registro_gastos(es_proveedor, es_prestamo, es_nomina, es_socios, registro_id, values)
+                    command=lambda: self._eliminar_registro_gastos(es_proveedor, es_prestamo, es_nomina, es_socios, es_transferencia, registro_id, values)
                 )
 
         try:
@@ -6067,12 +6148,14 @@ ORDER BY V.FOLIO, DA.ID;
         finally:
             menu.grab_release()
     
-    def _eliminar_registro_gastos(self, es_proveedor, es_prestamo, es_nomina, es_socios, registro_id, values):
-        """Elimina un gasto, pago a proveedor, préstamo, nómina o socios."""
+    def _eliminar_registro_gastos(self, es_proveedor, es_prestamo, es_nomina, es_socios, es_transferencia, registro_id, values):
+        """Elimina un gasto, pago a proveedor, préstamo, nómina, socios o transferencia."""
         if es_nomina:
             tipo = "pago de nómina"
         elif es_socios:
             tipo = "pago a socios"
+        elif es_transferencia:
+            tipo = "transferencia"
         elif es_prestamo:
             tipo = "préstamo"
         elif es_proveedor:
@@ -6088,6 +6171,8 @@ ORDER BY V.FOLIO, DA.ID;
                 self.ds.eliminar_pago_nomina(registro_id)
             elif es_socios:
                 self.ds.eliminar_pago_socios(registro_id)
+            elif es_transferencia:
+                self.ds.eliminar_transferencia(registro_id)
             elif es_prestamo:
                 self.ds.eliminar_prestamo(registro_id)
             elif es_proveedor:

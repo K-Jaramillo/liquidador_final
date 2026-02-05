@@ -458,6 +458,24 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_pago_socios_fecha ON pago_socios(fecha)')
     
     # ══════════════════════════════════════════════════════════════════
+    # TABLA: TRANSFERENCIAS
+    # Guarda las transferencias por fecha
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transferencias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            destinatario TEXT NOT NULL,
+            concepto TEXT,
+            monto REAL NOT NULL DEFAULT 0,
+            observaciones TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_transferencias_fecha ON transferencias(fecha)')
+    
+    # ══════════════════════════════════════════════════════════════════
     # TABLA: CREDITOS_PUNTEADOS
     # Registra las facturas marcadas como crédito punteado
     # ══════════════════════════════════════════════════════════════════
@@ -2237,6 +2255,85 @@ def actualizar_pago_socios(pago_id: int, socio: str, concepto: str, monto: float
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA TRANSFERENCIAS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def agregar_transferencia(fecha: str, destinatario: str, concepto: str, monto: float, observaciones: str = '') -> int:
+    """Agrega una nueva transferencia. Retorna el ID del registro creado."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO transferencias (fecha, destinatario, concepto, monto, observaciones)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (fecha, destinatario, concepto, monto, observaciones))
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def obtener_transferencias_fecha(fecha: str) -> List[Dict[str, Any]]:
+    """Obtiene las transferencias de una fecha específica."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, fecha, destinatario, concepto, monto, observaciones, fecha_creacion
+        FROM transferencias 
+        WHERE fecha = ?
+        ORDER BY id DESC
+    ''', (fecha,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_total_transferencias_fecha(fecha: str) -> float:
+    """Obtiene el total de transferencias de una fecha."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COALESCE(SUM(monto), 0) as total
+        FROM transferencias 
+        WHERE fecha = ?
+    ''', (fecha,))
+    row = cursor.fetchone()
+    conn.close()
+    return row['total'] if row else 0
+
+
+def eliminar_transferencia(transferencia_id: int) -> bool:
+    """Elimina una transferencia por su ID."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM transferencias WHERE id = ?', (transferencia_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error eliminando transferencia: {e}")
+        return False
+
+
+def actualizar_transferencia(transferencia_id: int, destinatario: str, concepto: str, monto: float, observaciones: str = '') -> bool:
+    """Actualiza una transferencia existente."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE transferencias 
+            SET destinatario = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (destinatario, concepto, monto, observaciones, transferencia_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando transferencia: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FUNCIONES PARA CORTE CAJERO (Eleventa)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2392,7 +2489,7 @@ else:
                        'configuracion', 'repartidores', 'historial_liquidaciones',
                        'pago_proveedores', 'prestamos', 'devoluciones_parciales',
                        'conceptos_gastos', 'creditos_punteados', 'pago_nomina', 'pago_socios',
-                       'corte_cajero', 'conteos_sesion', 'conteos_sesion_detalle'}
+                       'transferencias', 'corte_cajero', 'conteos_sesion', 'conteos_sesion_detalle'}
     
     if not required_tables.issubset(tables):
         init_database()
