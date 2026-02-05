@@ -107,12 +107,24 @@ Almacena: asignaciones, descuentos, gastos, conteo de dinero, configuración
 
 import sqlite3
 import os
+import sys
 import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
+
+def _get_app_dir():
+    """Obtiene el directorio de la aplicación, compatible con PyInstaller."""
+    if getattr(sys, 'frozen', False):
+        # Si está compilado con PyInstaller
+        return os.path.dirname(sys.executable)
+    else:
+        # Si es script normal
+        return os.path.dirname(os.path.abspath(__file__))
+
+
 # Ruta de la base de datos local
-DB_PATH = os.path.join(os.path.dirname(__file__), "liquidador_data.db")
+DB_PATH = os.path.join(_get_app_dir(), "liquidador_data.db")
 
 
 def get_connection():
@@ -2975,15 +2987,22 @@ def obtener_transferencias_fecha(fecha: str) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def obtener_total_transferencias_fecha(fecha: str) -> float:
-    """Obtiene el total de transferencias de una fecha."""
+def obtener_total_transferencias_fecha(fecha: str, destinatario: str = '') -> float:
+    """Obtiene el total de transferencias de una fecha, opcionalmente filtrado por destinatario."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COALESCE(SUM(monto), 0) as total
-        FROM transferencias 
-        WHERE fecha = ?
-    ''', (fecha,))
+    if destinatario:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM transferencias 
+            WHERE fecha = ? AND destinatario = ?
+        ''', (fecha, destinatario))
+    else:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM transferencias 
+            WHERE fecha = ?
+        ''', (fecha,))
     row = cursor.fetchone()
     conn.close()
     return row['total'] if row else 0
