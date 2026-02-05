@@ -3,6 +3,7 @@
 Script para probar la conexión a Firebird y verificar que isql funciona
 """
 import subprocess
+import sys
 import os
 
 print("=" * 60)
@@ -47,14 +48,19 @@ print("3. Ejecutando consulta de prueba...")
 sql = "SELECT COUNT(*) as TEST FROM RDB$RELATIONS;\nQUIT;"
 
 try:
+    run_kwargs = {
+        'input': sql,
+        'capture_output': True,
+        'text': True,
+        'timeout': 10,
+        'encoding': 'cp1252',
+        'errors': 'ignore'
+    }
+    if sys.platform == 'win32':
+        run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
     resultado = subprocess.run(
         [isql_encontrado, '-u', 'SYSDBA', '-p', 'masterkey', ruta_fdb],
-        input=sql,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        encoding='cp1252',
-        errors='ignore'
+        **run_kwargs
     )
     
     print(f"   Return code: {resultado.returncode}")

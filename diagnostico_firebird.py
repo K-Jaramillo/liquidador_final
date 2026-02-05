@@ -17,7 +17,10 @@ print()
 # 1. Verificar PATH
 print("1. Verificando si 'isql' está en PATH...")
 try:
-    resultado = subprocess.run(['where', 'isql'], capture_output=True, text=True)
+    run_kwargs = {'capture_output': True, 'text': True}
+    if sys.platform == 'win32':
+        run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    resultado = subprocess.run(['where', 'isql'], **run_kwargs)
     if resultado.returncode == 0:
         print(f"   ✓ Encontrado en PATH: {resultado.stdout.strip()}")
     else:
@@ -83,7 +86,10 @@ print("4. Intentando verificar versión de Firebird...")
 if encontradas:
     isql_path = encontradas[0]  # Usar la primera encontrada
     try:
-        resultado = subprocess.run([isql_path, '-version'], capture_output=True, text=True, timeout=5)
+        run_kwargs = {'capture_output': True, 'text': True, 'timeout': 5}
+        if sys.platform == 'win32':
+            run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        resultado = subprocess.run([isql_path, '-version'], **run_kwargs)
         print(f"   ✓ Versión: {resultado.stdout.strip()}")
     except:
         print(f"   ✗ No se pudo obtener versión")

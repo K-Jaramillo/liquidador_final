@@ -8633,7 +8633,8 @@ WHERE F.FOLIO = {folio_int};
                             ['isql', '-version'],
                             capture_output=True,
                             timeout=2,
-                            encoding='utf-8'
+                            encoding='utf-8',
+                            creationflags=subprocess.CREATE_NO_WINDOW
                         )
                         if resultado_test.returncode == 0:
                             isql_path = 'isql'
@@ -8694,15 +8695,20 @@ WHERE F.FOLIO = {folio_int};
             # porque Firebird a menudo devuelve datos en esa codificación
             encoding_usar = 'cp1252' if es_windows else 'utf-8'
             
-            resultado = subprocess.run(
-                cmd,
-                input=sql_completo,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                encoding=encoding_usar,
-                errors='ignore'  # Ignorar errores de codificación
-            )
+            # Configurar kwargs para subprocess
+            run_kwargs = {
+                'input': sql_completo,
+                'capture_output': True,
+                'text': True,
+                'timeout': 30,
+                'encoding': encoding_usar,
+                'errors': 'ignore'
+            }
+            # En Windows, ocultar ventana de CMD
+            if es_windows:
+                run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            
+            resultado = subprocess.run(cmd, **run_kwargs)
             
             # En Linux con conexión TCP/IP, isql siempre muestra "Use CONNECT..." en stderr
             # pero eso no es un error si hay datos válidos en stdout

@@ -42,7 +42,17 @@ def obtener_cancelaciones_por_usuario(fecha: str, db_path: str = None, isql_path
     GROUP BY D.CAJERO;
     """
     cmd = [isql_path, '-u', 'SYSDBA', '-p', 'masterkey', '-ch', 'WIN1252', db_path]
-    proc = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=60, encoding='cp1252', errors='replace')
+    run_kwargs = {
+        'input': sql,
+        'capture_output': True,
+        'text': True,
+        'timeout': 60,
+        'encoding': 'cp1252',
+        'errors': 'replace'
+    }
+    if sys.platform == 'win32':
+        run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    proc = subprocess.run(cmd, **run_kwargs)
     stdout = proc.stdout or ""
     
     resumen = {}
@@ -148,6 +158,7 @@ Fecha: Febrero 2026
 """
 
 import subprocess
+import sys
 import os
 from datetime import datetime, date
 from typing import Dict, Any, Optional, Tuple, List
@@ -337,15 +348,17 @@ class CorteCajeroManager:
         ]
         
         try:
-            proc = subprocess.run(
-                cmd,
-                input=sql,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                encoding='cp1252',
-                errors='replace'
-            )
+            run_kwargs = {
+                'input': sql,
+                'capture_output': True,
+                'text': True,
+                'timeout': 60,
+                'encoding': 'cp1252',
+                'errors': 'replace'
+            }
+            if sys.platform == 'win32':
+                run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            proc = subprocess.run(cmd, **run_kwargs)
             
             stdout = proc.stdout or ""
             stderr = proc.stderr or ""

@@ -11,6 +11,7 @@ from tkinter import ttk, filedialog, messagebox
 from datetime import datetime, timedelta
 import pandas as pd
 import subprocess
+import sys
 import os
 import tempfile
 from pathlib import Path
@@ -168,14 +169,16 @@ class ExportadorVentas:
             cmd = ['sudo', self.isql_path, '-u', self.usuario, '-p', self.password, 
                    self.ruta_fdb.get()]
             
-            resultado = subprocess.run(
-                cmd,
-                input=sql,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                encoding='utf-8'
-            )
+            run_kwargs = {
+                'input': sql,
+                'capture_output': True,
+                'text': True,
+                'timeout': 30,
+                'encoding': 'utf-8'
+            }
+            if sys.platform == 'win32':
+                run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            resultado = subprocess.run(cmd, **run_kwargs)
             
             return resultado.returncode == 0, resultado.stdout, resultado.stderr
         

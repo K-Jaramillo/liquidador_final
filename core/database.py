@@ -74,15 +74,19 @@ class DatabaseManager:
         ]
         
         try:
-            proc = subprocess.run(
-                cmd,
-                input=sql,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                encoding='utf-8',
-                errors='replace'
-            )
+            # En Windows, ocultar ventana CMD
+            kwargs = {
+                'input': sql,
+                'capture_output': True,
+                'text': True,
+                'timeout': 60,
+                'encoding': 'utf-8',
+                'errors': 'replace'
+            }
+            if sys.platform == 'win32':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            
+            proc = subprocess.run(cmd, **kwargs)
             
             stdout = proc.stdout or ""
             stderr = proc.stderr or ""
