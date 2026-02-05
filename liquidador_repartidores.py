@@ -503,16 +503,18 @@ class DataStore:
             db_local.actualizar_pago_nomina(pago_id, empleado, concepto, monto, observaciones)
             self._notificar()
 
-    def get_pagos_nomina(self) -> list:
-        """Obtiene los pagos de nómina de la fecha actual."""
+    def get_pagos_nomina(self, repartidor: str = '') -> list:
+        """Obtiene los pagos de nómina de la fecha actual, opcionalmente filtrado por repartidor."""
         if USE_SQLITE:
+            if repartidor:
+                return db_local.obtener_pagos_nomina_repartidor(self.fecha, repartidor)
             return db_local.obtener_pagos_nomina_fecha(self.fecha)
         return []
 
-    def get_total_pagos_nomina(self) -> float:
-        """Retorna el total de pagos de nómina."""
+    def get_total_pagos_nomina(self, repartidor: str = '') -> float:
+        """Retorna el total de pagos de nómina, opcionalmente filtrado por repartidor."""
         if USE_SQLITE:
-            return db_local.obtener_total_pagos_nomina_fecha(self.fecha)
+            return db_local.obtener_total_pagos_nomina_fecha(self.fecha, repartidor)
         return 0.0
 
     # --- pagos a socios ---
@@ -536,16 +538,18 @@ class DataStore:
             db_local.actualizar_pago_socios(pago_id, socio, concepto, monto, observaciones)
             self._notificar()
 
-    def get_pagos_socios(self) -> list:
-        """Obtiene los pagos a socios de la fecha actual."""
+    def get_pagos_socios(self, repartidor: str = '') -> list:
+        """Obtiene los pagos a socios de la fecha actual, opcionalmente filtrado por repartidor."""
         if USE_SQLITE:
+            if repartidor:
+                return db_local.obtener_pagos_socios_repartidor(self.fecha, repartidor)
             return db_local.obtener_pagos_socios_fecha(self.fecha)
         return []
 
-    def get_total_pagos_socios(self) -> float:
-        """Retorna el total de pagos a socios."""
+    def get_total_pagos_socios(self, repartidor: str = '') -> float:
+        """Retorna el total de pagos a socios, opcionalmente filtrado por repartidor."""
         if USE_SQLITE:
-            return db_local.obtener_total_pagos_socios_fecha(self.fecha)
+            return db_local.obtener_total_pagos_socios_fecha(self.fecha, repartidor)
         return 0.0
 
     # --- transferencias ---
@@ -569,16 +573,18 @@ class DataStore:
             db_local.actualizar_transferencia(transferencia_id, destinatario, concepto, monto, observaciones)
             self._notificar()
 
-    def get_transferencias(self) -> list:
-        """Obtiene las transferencias de la fecha actual."""
+    def get_transferencias(self, repartidor: str = '') -> list:
+        """Obtiene las transferencias de la fecha actual, opcionalmente filtrado por repartidor."""
         if USE_SQLITE:
+            if repartidor:
+                return db_local.obtener_transferencias_repartidor(self.fecha, repartidor)
             return db_local.obtener_transferencias_fecha(self.fecha)
         return []
 
-    def get_total_transferencias(self) -> float:
-        """Retorna el total de transferencias."""
+    def get_total_transferencias(self, repartidor: str = '') -> float:
+        """Retorna el total de transferencias, opcionalmente filtrado por repartidor."""
         if USE_SQLITE:
-            return db_local.obtener_total_transferencias_fecha(self.fecha)
+            return db_local.obtener_total_transferencias_fecha(self.fecha, repartidor)
         return 0.0
 
     # --- conceptos de gastos ---
@@ -4716,13 +4722,13 @@ ORDER BY V.FOLIO, DA.ID;
         total_salidas = self.ds.get_total_salidas()
         
         # 16. Pagos de Nómina (desde SQLite)
-        total_pago_nomina = self.ds.get_total_pagos_nomina()
+        total_pago_nomina = self.ds.get_total_pagos_nomina(filtro_gastos)
         
         # 17. Pagos a Socios (desde SQLite)
-        total_pago_socios = self.ds.get_total_pagos_socios()
+        total_pago_socios = self.ds.get_total_pagos_socios(filtro_gastos)
         
         # 18. Transferencias (desde SQLite)
-        total_transferencias = self.ds.get_total_transferencias()
+        total_transferencias = self.ds.get_total_transferencias(filtro_gastos)
         
         # ═══════════════════════════════════════════════════════════════════════
         # CÁLCULOS FINALES
@@ -6173,9 +6179,15 @@ ORDER BY V.FOLIO, DA.ID;
                   width=14, justify=tk.RIGHT).grid(row=3, column=1, sticky=tk.W, padx=(4, 0), pady=(0, 4))
         ttk.Label(frame_entrada, text="$").grid(row=3, column=2, sticky=tk.W, padx=(2, 16), pady=(0, 4))
         
-        # Fila 4: Botón
+        # Fila 4: Observaciones
+        ttk.Label(frame_entrada, text="Observaciones:").grid(row=4, column=0, sticky=tk.W, pady=(0, 4))
+        self.gasto_observ_var = tk.StringVar()
+        ttk.Entry(frame_entrada, textvariable=self.gasto_observ_var, width=50).grid(
+            row=4, column=1, columnspan=4, sticky=tk.W, padx=(4, 0), pady=(0, 4))
+        
+        # Fila 5: Botón
         ttk.Button(frame_entrada, text="＋  Añadir Registro",
-                   command=self._añadir_gasto).grid(row=4, column=1, sticky=tk.W, pady=(8, 0))
+                   command=self._añadir_gasto).grid(row=5, column=1, sticky=tk.W, pady=(8, 0))
 
         # --- tabla de gastos registrados ---
         frame_tabla = ttk.LabelFrame(self.tab_gastos, text="💸 GASTOS REGISTRADOS (Doble clic para editar)", padding=(5, 5))
@@ -6280,8 +6292,8 @@ ORDER BY V.FOLIO, DA.ID;
 
     def _cargar_tipos_gasto(self):
         """Carga los tipos de gasto en el combobox."""
-        # Solo los tipos que aparecen en DESCUENTOS Y AJUSTES
-        tipos = ["GASTO", "GASTO CAJERO", "PAGO PROVEEDOR", "PRÉSTAMO", "NÓMINA", "SOCIOS", "TRANSFERENCIA"]
+        # Tipos disponibles para registrar movimientos
+        tipos = ["GASTO", "PAGO PROVEEDOR", "PRÉSTAMO", "NÓMINA", "SOCIO", "TRANSFERENCIA"]
         self.gasto_tipo_combo['values'] = tipos
         self.gasto_tipo_combo.config(state="readonly")  # No permitir tipos personalizados
     
@@ -6543,6 +6555,7 @@ ORDER BY V.FOLIO, DA.ID;
         tipo = self.gasto_tipo_var.get()
         rep = self.gasto_rep_var.get().strip()
         concepto = self.gasto_concepto_var.get().strip()
+        observaciones = self.gasto_observ_var.get().strip()
         try:
             monto = float(self.gasto_monto_var.get() or 0)
         except ValueError:
@@ -6561,27 +6574,25 @@ ORDER BY V.FOLIO, DA.ID;
 
         # Verificar tipo de registro según combobox
         if tipo == "PRÉSTAMO":
-            self.ds.agregar_prestamo(rep, concepto, monto, "")
+            self.ds.agregar_prestamo(rep, concepto, monto, observaciones)
         elif tipo == "PAGO PROVEEDOR":
-            self.ds.agregar_pago_proveedor(proveedor=concepto, concepto=f"Pago por {rep}", monto=monto, repartidor=rep, observaciones="")
+            self.ds.agregar_pago_proveedor(proveedor=concepto, concepto=f"Pago por {rep}", monto=monto, repartidor=rep, observaciones=observaciones)
         elif tipo == "NÓMINA":
             # Guardar en tabla dedicada pago_nomina
-            self.ds.agregar_pago_nomina(rep, concepto, monto, "")
-        elif tipo == "SOCIOS":
+            self.ds.agregar_pago_nomina(rep, concepto, monto, observaciones)
+        elif tipo == "SOCIO":
             # Guardar en tabla dedicada pago_socios
-            self.ds.agregar_pago_socios(rep, concepto, monto, "")
+            self.ds.agregar_pago_socios(rep, concepto, monto, observaciones)
         elif tipo == "TRANSFERENCIA":
             # Guardar en tabla dedicada transferencias
-            self.ds.agregar_transferencia(rep, concepto, monto, "")
-        elif tipo == "GASTO CAJERO":
-            # Gasto de cajero
-            self.ds.agregar_gasto("CAJERO", concepto, monto, "")
+            self.ds.agregar_transferencia(rep, concepto, monto, observaciones)
         else:  # GASTO normal
-            self.ds.agregar_gasto(rep, concepto, monto, "")
+            self.ds.agregar_gasto(rep, concepto, monto, observaciones)
 
         # reset campos (excepto repartidor que se mantiene)
         self.gasto_concepto_var.set("")
         self.gasto_monto_var.set("0.00")
+        self.gasto_observ_var.set("")
         self.gasto_tipo_var.set("GASTO")
         
         # Refrescar
@@ -6632,16 +6643,13 @@ ORDER BY V.FOLIO, DA.ID;
         frame = ttk.Frame(dialog, padding=20)
         frame.pack(fill=tk.BOTH, expand=True)
         
-        # Título - detectar tipo basado en el concepto guardado
-        concepto_actual = values[3] if len(values) > 3 else ""
-        concepto_upper = concepto_actual.upper()
-        
+        # Detectar tipo inicial basado en el origen del registro
         if es_nomina:
-            tipo_texto = "💰 PAGO NÓMINA"
-            tipo_inicial = "PAGO NOMINA"
+            tipo_texto = "💰 NÓMINA"
+            tipo_inicial = "NÓMINA"
         elif es_socios:
-            tipo_texto = "🤝 PAGO SOCIOS"
-            tipo_inicial = "SOCIOS"
+            tipo_texto = "🤝 SOCIO"
+            tipo_inicial = "SOCIO"
         elif es_transferencia:
             tipo_texto = "💸 TRANSFERENCIA"
             tipo_inicial = "TRANSFERENCIA"
@@ -6649,36 +6657,26 @@ ORDER BY V.FOLIO, DA.ID;
             tipo_texto = "💵 PRÉSTAMO"
             tipo_inicial = "PRÉSTAMO"
         elif es_proveedor:
-            tipo_texto = "💼 PAGO A PROVEEDOR"
+            tipo_texto = "💼 PAGO PROVEEDOR"
             tipo_inicial = "PAGO PROVEEDOR"
-        elif 'NOMINA' in concepto_upper or 'NÓMINA' in concepto_upper:
-            tipo_texto = "💰 PAGO NÓMINA"
-            tipo_inicial = "PAGO NOMINA"
-        elif 'SOCIO' in concepto_upper:
-            tipo_texto = "🤝 PAGO SOCIOS"
-            tipo_inicial = "SOCIOS"
-        elif 'TRANSFERENCIA' in concepto_upper:
-            tipo_texto = "💸 TRANSFERENCIA"
-            tipo_inicial = "TRANSFERENCIA"
         else:
             tipo_texto = "🔧 GASTO"
             tipo_inicial = "GASTO"
+        
         ttk.Label(frame, text=f"Editando {tipo_texto}", 
                   font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, pady=(0, 15))
         
-        # Tipo de registro (Combobox)
+        # Tipo de registro (Combobox) - mismos tipos que creación
         frame_tipo = ttk.Frame(frame)
         frame_tipo.pack(fill=tk.X, pady=5)
         ttk.Label(frame_tipo, text="Tipo:", width=12).pack(side=tk.LEFT)
         tipo_var = tk.StringVar(value=tipo_inicial)
-        tipos_disponibles = self.ds.get_conceptos_gastos()
-        if not tipos_disponibles:
-            tipos_disponibles = ["GASTO", "PRÉSTAMO", "PAGO PROVEEDOR"]
+        tipos_disponibles = ["GASTO", "PAGO PROVEEDOR", "PRÉSTAMO", "NÓMINA", "SOCIO", "TRANSFERENCIA"]
         tipo_combo = ttk.Combobox(frame_tipo, textvariable=tipo_var, width=20,
-                                   values=tipos_disponibles)
+                                   values=tipos_disponibles, state="readonly")
         tipo_combo.pack(side=tk.LEFT, padx=5)
         
-        # Repartidor/Proveedor
+        # Repartidor/Destinatario
         frame_rep = ttk.Frame(frame)
         frame_rep.pack(fill=tk.X, pady=5)
         ttk.Label(frame_rep, text="Repartidor:", width=12).pack(side=tk.LEFT)
@@ -6732,20 +6730,53 @@ ORDER BY V.FOLIO, DA.ID;
                 messagebox.showwarning("Advertencia", "Complete todos los campos", parent=dialog)
                 return
             
-            # Actualizar registro existente (sin eliminar/crear para evitar duplicados)
-            if es_nomina:
-                self.ds.actualizar_pago_nomina(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
-            elif es_socios:
-                self.ds.actualizar_pago_socios(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
-            elif es_transferencia:
-                self.ds.actualizar_transferencia(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
-            elif es_prestamo:
-                self.ds.actualizar_prestamo(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
-            elif es_proveedor:
-                self.ds.actualizar_pago_proveedor(registro_id, nuevo_conc, f"Pago por {nuevo_rep}", 
-                                                   nuevo_monto, nuevo_rep, nuevo_obs)
+            # Si el tipo cambió, eliminar el original y crear nuevo
+            tipo_cambio = nuevo_tipo != tipo_inicial
+            
+            if tipo_cambio:
+                # Eliminar registro original
+                if es_nomina:
+                    self.ds.eliminar_pago_nomina(registro_id)
+                elif es_socios:
+                    self.ds.eliminar_pago_socios(registro_id)
+                elif es_transferencia:
+                    self.ds.eliminar_transferencia(registro_id)
+                elif es_prestamo:
+                    self.ds.eliminar_prestamo(registro_id)
+                elif es_proveedor:
+                    self.ds.eliminar_pago_proveedor(registro_id)
+                else:
+                    self.ds.eliminar_gasto(registro_id)
+                
+                # Crear nuevo registro del tipo seleccionado
+                if nuevo_tipo == "PRÉSTAMO":
+                    self.ds.agregar_prestamo(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                elif nuevo_tipo == "PAGO PROVEEDOR":
+                    self.ds.agregar_pago_proveedor(proveedor=nuevo_conc, concepto=f"Pago por {nuevo_rep}", 
+                                                   monto=nuevo_monto, repartidor=nuevo_rep, observaciones=nuevo_obs)
+                elif nuevo_tipo == "NÓMINA":
+                    self.ds.agregar_pago_nomina(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                elif nuevo_tipo == "SOCIO":
+                    self.ds.agregar_pago_socios(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                elif nuevo_tipo == "TRANSFERENCIA":
+                    self.ds.agregar_transferencia(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                else:  # GASTO
+                    self.ds.agregar_gasto(nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             else:
-                self.ds.actualizar_gasto(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                # Actualizar registro existente del mismo tipo
+                if es_nomina:
+                    self.ds.actualizar_pago_nomina(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                elif es_socios:
+                    self.ds.actualizar_pago_socios(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                elif es_transferencia:
+                    self.ds.actualizar_transferencia(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                elif es_prestamo:
+                    self.ds.actualizar_prestamo(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
+                elif es_proveedor:
+                    self.ds.actualizar_pago_proveedor(registro_id, nuevo_conc, f"Pago por {nuevo_rep}", 
+                                                       nuevo_monto, nuevo_rep, nuevo_obs)
+                else:
+                    self.ds.actualizar_gasto(registro_id, nuevo_rep, nuevo_conc, nuevo_monto, nuevo_obs)
             
             dialog.destroy()
             self._refrescar_tab_gastos()

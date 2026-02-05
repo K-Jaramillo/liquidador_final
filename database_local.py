@@ -673,6 +673,19 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_folio ON historial_abonos(folio)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_origen ON historial_abonos(origen)')
     
+    # ══════════════════════════════════════════════════════════════════
+    # MIGRACIONES: Agregar columnas observaciones si no existen
+    # ══════════════════════════════════════════════════════════════════
+    try:
+        cursor.execute('ALTER TABLE prestamos ADD COLUMN observaciones TEXT')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE pago_proveedores ADD COLUMN observaciones TEXT')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE gastos ADD COLUMN observaciones TEXT')
+    except: pass
+    
     conn.commit()
     conn.close()
     
@@ -2814,18 +2827,38 @@ def obtener_pagos_nomina_fecha(fecha: str) -> List[Dict]:
     return [dict(row) for row in rows]
 
 
-def obtener_total_pagos_nomina_fecha(fecha: str) -> float:
-    """Obtiene el total de pagos de nómina de una fecha."""
+def obtener_total_pagos_nomina_fecha(fecha: str, empleado: str = '') -> float:
+    """Obtiene el total de pagos de nómina de una fecha, opcionalmente filtrado por empleado."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COALESCE(SUM(monto), 0) as total
-        FROM pago_nomina 
-        WHERE fecha = ?
-    ''', (fecha,))
+    if empleado:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM pago_nomina 
+            WHERE fecha = ? AND empleado = ?
+        ''', (fecha, empleado))
+    else:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM pago_nomina 
+            WHERE fecha = ?
+        ''', (fecha,))
     row = cursor.fetchone()
     conn.close()
     return row['total'] if row else 0
+
+
+def obtener_pagos_nomina_repartidor(fecha: str, empleado: str) -> List[Dict]:
+    """Obtiene los pagos de nómina de una fecha filtrados por empleado/repartidor."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM pago_nomina WHERE fecha = ? AND empleado = ?
+        ORDER BY fecha_creacion
+    ''', (fecha, empleado))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def eliminar_pago_nomina(pago_id: int) -> bool:
@@ -2896,18 +2929,38 @@ def obtener_pagos_socios_fecha(fecha: str) -> List[Dict]:
     return [dict(row) for row in rows]
 
 
-def obtener_total_pagos_socios_fecha(fecha: str) -> float:
-    """Obtiene el total de pagos a socios de una fecha."""
+def obtener_total_pagos_socios_fecha(fecha: str, socio: str = '') -> float:
+    """Obtiene el total de pagos a socios de una fecha, opcionalmente filtrado por socio."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COALESCE(SUM(monto), 0) as total
-        FROM pago_socios 
-        WHERE fecha = ?
-    ''', (fecha,))
+    if socio:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM pago_socios 
+            WHERE fecha = ? AND socio = ?
+        ''', (fecha, socio))
+    else:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM pago_socios 
+            WHERE fecha = ?
+        ''', (fecha,))
     row = cursor.fetchone()
     conn.close()
     return row['total'] if row else 0
+
+
+def obtener_pagos_socios_repartidor(fecha: str, socio: str) -> List[Dict]:
+    """Obtiene los pagos a socios de una fecha filtrados por socio/repartidor."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM pago_socios WHERE fecha = ? AND socio = ?
+        ORDER BY fecha_creacion
+    ''', (fecha, socio))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def eliminar_pago_socios(pago_id: int) -> bool:
@@ -2975,18 +3028,40 @@ def obtener_transferencias_fecha(fecha: str) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def obtener_total_transferencias_fecha(fecha: str) -> float:
-    """Obtiene el total de transferencias de una fecha."""
+def obtener_total_transferencias_fecha(fecha: str, destinatario: str = '') -> float:
+    """Obtiene el total de transferencias de una fecha, opcionalmente filtrado por destinatario."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COALESCE(SUM(monto), 0) as total
-        FROM transferencias 
-        WHERE fecha = ?
-    ''', (fecha,))
+    if destinatario:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM transferencias 
+            WHERE fecha = ? AND destinatario = ?
+        ''', (fecha, destinatario))
+    else:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM transferencias 
+            WHERE fecha = ?
+        ''', (fecha,))
     row = cursor.fetchone()
     conn.close()
     return row['total'] if row else 0
+
+
+def obtener_transferencias_repartidor(fecha: str, destinatario: str) -> List[Dict]:
+    """Obtiene las transferencias de una fecha filtradas por destinatario/repartidor."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, fecha, destinatario, concepto, monto, observaciones, fecha_creacion
+        FROM transferencias 
+        WHERE fecha = ? AND destinatario = ?
+        ORDER BY id DESC
+    ''', (fecha, destinatario))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def eliminar_transferencia(transferencia_id: int) -> bool:
