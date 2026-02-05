@@ -5,29 +5,20 @@ Script para explorar el contenido completo de la base de datos Firebird
 
 import fdb
 import os
-import platform
+import sys
 
-# Detectar sistema operativo y cargar la librería adecuada
-if platform.system() == "Windows":
-    # Ruta típica de Firebird en Windows
-    firebird_lib = r"C:\Program Files\Firebird\Firebird_2_5\bin\fbclient.dll"
-    if os.path.exists(firebird_lib):
-        fdb.load_api(firebird_lib)
-elif platform.system() == "Linux":
-    firebird_lib = "/opt/firebird/lib/libfbclient.so.2"
-    if os.path.exists(firebird_lib):
-        fdb.load_api(firebird_lib)
+# Agregar el directorio padre al path para importar core
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DB_PATH = r"D:\BD\PDVDATA.FDB"
+from core.firebird_setup import get_firebird_setup, get_fdb_connection
+from core.config import Config
+
+# Inicializar la configuración de Firebird multiplataforma
+firebird_setup = get_firebird_setup()
 
 def conectar():
-    """Conectar a la base de datos"""
-    return fdb.connect(
-        dsn=DB_PATH,
-        user='SYSDBA',
-        password='masterkey',
-        charset='WIN1252'
-    )
+    """Conectar a la base de datos usando la configuración multiplataforma"""
+    return get_fdb_connection()
 
 def listar_tablas(cursor):
     """Listar todas las tablas de usuario"""

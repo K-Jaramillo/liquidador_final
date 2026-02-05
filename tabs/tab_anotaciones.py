@@ -263,8 +263,8 @@ class TabAnotaciones:
         self.canvas_notas.bind("<Button-4>", self._on_mousewheel)
         self.canvas_notas.bind("<Button-5>", self._on_mousewheel)
         
-        # Cargar anotaciones existentes
-        self._cargar_anotaciones()
+        # Cargar anotaciones existentes (sin threading durante inicialización)
+        self._cargar_anotaciones(use_threading=False)
 
     def _on_fecha_cambio(self):
         """Maneja el cambio de fecha desde el entry de la pestaña."""
@@ -413,11 +413,14 @@ class TabAnotaciones:
         self._actualizar_scrollregion()
         messagebox.showinfo("Reorganizado", f"Se reorganizaron {len(notas)} notas")
     
-    def _cargar_anotaciones(self):
+    def _cargar_anotaciones(self, use_threading=True):
         """
         Carga las anotaciones desde SQLite de forma eficiente.
         Evita bloqueos UI usando threading si hay muchas notas.
         Garantiza que todas las notas se cargan correctamente.
+        
+        Args:
+            use_threading: Si False, carga de forma síncrona (útil durante inicialización)
         """
         if not HAS_DB:
             return
@@ -429,12 +432,13 @@ class TabAnotaciones:
         
         self._cargando = True
         
-        def cargar_en_background():
+        # Obtener valores de variables tkinter en el hilo principal ANTES de crear el hilo
+        filtro = self.filtro_notas_var.get()
+        fecha = self._fecha_actual()
+        
+        def cargar_datos():
+            """Función que carga los datos (puede ejecutarse en cualquier hilo)"""
             try:
-                # Obtener filtro y fecha
-                filtro = self.filtro_notas_var.get()
-                fecha = self._fecha_actual()
-                
                 print(f"[DEBUG] Cargando anotaciones para fecha: {fecha}, filtro: {filtro}")
                 
                 # Obtener notas con la fecha específica
@@ -458,22 +462,41 @@ class TabAnotaciones:
                 # Actualizar cache
                 self._notas_cache = {n['id']: n for n in notas}
                 
-                # Actualizar UI en thread principal
-                self.parent.after(0, self._actualizar_canvas_notas, notas)
+                return notas
                 
             except Exception as e:
                 print(f"[ERROR] Error cargando anotaciones: {e}")
                 import traceback
                 traceback.print_exc()
-            finally:
-                self._cargando = False
-                if self._pending_refresh:
-                    self._pending_refresh = False
-                    self.parent.after(100, self._cargar_anotaciones)
+                return []
         
-        # Usar thread si hay muchas notas
-        thread = threading.Thread(target=cargar_en_background, daemon=True)
-        thread.start()
+        def finalizar():
+            self._cargando = False
+            if self._pending_refresh:
+                self._pending_refresh = False
+                self.parent.after(100, self._cargar_anotaciones)
+        
+        if use_threading:
+            # Usar threading para no bloquear UI
+            def cargar_en_background():
+                try:
+                    notas = cargar_datos()
+                    # Actualizar UI en thread principal
+                    self.parent.after(0, self._actualizar_canvas_notas, notas)
+                except Exception as e:
+                    print(f"[ERROR] Error en background: {e}")
+                finally:
+                    self.parent.after(0, finalizar)
+            
+            thread = threading.Thread(target=cargar_en_background, daemon=True)
+            thread.start()
+        else:
+            # Carga síncrona (para inicialización)
+            try:
+                notas = cargar_datos()
+                self._actualizar_canvas_notas(notas)
+            finally:
+                finalizar()
 
     def _actualizar_canvas_notas(self, notas: List[Dict]):
         """Actualiza el canvas con las notas (debe ejecutarse en thread principal)."""

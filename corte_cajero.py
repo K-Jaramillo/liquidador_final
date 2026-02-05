@@ -13,6 +13,8 @@ def obtener_cancelaciones_por_usuario(fecha: str, db_path: str = None, isql_path
     Retorna: { 'admin': {'total': 123.45, 'num': 2, 'detalle': {...}}, ... }
     """
     import subprocess
+    import sys
+    import os
     from collections import defaultdict
     db_path = db_path or DB_PATH_DEFAULT
     isql_path = isql_path or ISQL_PATH_DEFAULT
@@ -41,8 +43,24 @@ def obtener_cancelaciones_por_usuario(fecha: str, db_path: str = None, isql_path
     WHERE CAST(D.DEVUELTO_EN AS DATE) = '{fecha}'
     GROUP BY D.CAJERO;
     """
-    cmd = [isql_path, '-u', 'SYSDBA', '-p', 'masterkey', '-ch', 'WIN1252', db_path]
-    proc = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=60, encoding='cp1252', errors='replace')
+    
+    # Construir comando según plataforma
+    if sys.platform == 'win32':
+        cmd = [isql_path, '-u', 'SYSDBA', '-p', 'masterkey', '-ch', 'WIN1252', db_path]
+        env = None
+        encoding = 'cp1252'
+    else:
+        # En Linux, WIN1252 puede no estar definido en Firebird embebido
+        cmd = [isql_path, '-u', 'SYSDBA', '-p', 'masterkey', db_path]
+        try:
+            from core.firebird_setup import get_firebird_setup
+            setup = get_firebird_setup()
+            env = setup.get_isql_env()
+        except ImportError:
+            env = os.environ.copy()
+        encoding = 'latin-1'
+    
+    proc = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=60, encoding=encoding, errors='replace', env=env)
     stdout = proc.stdout or ""
     
     resumen = {}
@@ -149,6 +167,7 @@ Fecha: Febrero 2026
 
 import subprocess
 import os
+import sys
 from datetime import datetime, date
 from typing import Dict, Any, Optional, Tuple, List
 from dataclasses import dataclass
@@ -328,13 +347,33 @@ class CorteCajeroManager:
         Returns:
             Tupla (resultado, error)
         """
-        cmd = [
-            self.isql_path,
-            '-u', 'SYSDBA',
-            '-p', 'masterkey',
-            '-ch', 'WIN1252',
-            self.db_path
-        ]
+        # Construir comando según plataforma
+        if sys.platform == 'win32':
+            cmd = [
+                self.isql_path,
+                '-u', 'SYSDBA',
+                '-p', 'masterkey',
+                '-ch', 'WIN1252',
+                self.db_path
+            ]
+            env = None
+            encoding = 'cp1252'
+        else:
+            # En Linux, WIN1252 puede no estar definido en Firebird embebido
+            cmd = [
+                self.isql_path,
+                '-u', 'SYSDBA',
+                '-p', 'masterkey',
+                self.db_path
+            ]
+            # Obtener variables de entorno para Linux (LD_LIBRARY_PATH, FIREBIRD)
+            try:
+                from core.firebird_setup import get_firebird_setup
+                setup = get_firebird_setup()
+                env = setup.get_isql_env()
+            except ImportError:
+                env = os.environ.copy()
+            encoding = 'latin-1'
         
         try:
             proc = subprocess.run(
@@ -343,8 +382,9 @@ class CorteCajeroManager:
                 capture_output=True,
                 text=True,
                 timeout=60,
-                encoding='cp1252',
-                errors='replace'
+                encoding=encoding,
+                errors='replace',
+                env=env
             )
             
             stdout = proc.stdout or ""

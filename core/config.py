@@ -100,4 +100,21 @@ class Config:
             # Si no encuentra ninguna, retornar la más común
             return r'C:\Program Files\Firebird\Firebird_5_0\isql.exe'
         else:
-            return '/opt/firebird/bin/isql'
+            # Linux: buscar en múltiples ubicaciones posibles
+            # En Ubuntu/Debian, isql se renombra a isql-fb para evitar conflictos
+            posibles_rutas_linux = [
+                '/usr/bin/isql-fb',           # Ubuntu/Debian estándar
+                '/usr/bin/isql',              # Algunas distros
+                '/opt/firebird/bin/isql',     # Instalación manual de Firebird
+                '/usr/local/firebird/bin/isql',
+            ]
+            import shutil
+            for ruta in posibles_rutas_linux:
+                if os.path.exists(ruta):
+                    return ruta
+            # Intentar encontrar en PATH
+            isql_in_path = shutil.which('isql-fb') or shutil.which('isql')
+            if isql_in_path:
+                return isql_in_path
+            # Por defecto, retornar la más común en Ubuntu
+            return '/usr/bin/isql-fb'

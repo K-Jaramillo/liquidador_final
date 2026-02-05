@@ -19,6 +19,19 @@ from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
 
+# ---------------------------------------------------------------------------
+# Importar configuración de Firebird multiplataforma
+# ---------------------------------------------------------------------------
+try:
+    from core.firebird_setup import get_firebird_setup, get_fdb_connection
+    HAS_FIREBIRD_SETUP = True
+    # Inicializar la configuración de Firebird al importar
+    _firebird_setup = get_firebird_setup()
+except ImportError:
+    HAS_FIREBIRD_SETUP = False
+    _firebird_setup = None
+    print("⚠️ No se pudo cargar firebird_setup, usando configuración legacy")
+
 # Intentar importar tkcalendar para selector de fecha
 try:
     from tkcalendar import DateEntry
@@ -612,9 +625,12 @@ class LiquidadorRepartidores:
         self.ventana.geometry("1350x950")
         self.ventana.minsize(1100, 800)
 
-        # Rutas BD (ajusta según tu entorno)
-        # Detectar automáticamente el sistema operativo
-        if sys.platform == 'win32':
+        # Rutas BD usando configuración multiplataforma
+        if HAS_FIREBIRD_SETUP and _firebird_setup:
+            self.ruta_fdb = _firebird_setup.get_default_db_path()
+            self.isql_path = _firebird_setup.isql_path
+            self.firebird_setup = _firebird_setup
+        elif sys.platform == 'win32':
             self.ruta_fdb = r'D:\BD\PDVDATA.FDB'
             # Buscar isql en múltiples ubicaciones posibles
             posibles_rutas = [
@@ -633,10 +649,26 @@ class LiquidadorRepartidores:
                     break
             if not self.isql_path:
                 self.isql_path = r'C:\Program Files\Firebird\Firebird_5_0\isql.exe'
+            self.firebird_setup = None
         else:
-            # Linux
+            # Linux (fallback legacy)
             self.ruta_fdb = os.path.join(os.path.dirname(__file__), 'PDVDATA.FDB')
-            self.isql_path = '/opt/firebird/bin/isql'
+            # Buscar isql en múltiples ubicaciones (Ubuntu usa isql-fb)
+            posibles_rutas_linux = [
+                '/usr/bin/isql-fb',           # Ubuntu/Debian estándar
+                '/usr/bin/isql',              # Algunas distros
+                '/opt/firebird/bin/isql',     # Instalación manual
+                '/usr/local/firebird/bin/isql',
+            ]
+            self.isql_path = None
+            for ruta in posibles_rutas_linux:
+                if os.path.exists(ruta):
+                    self.isql_path = ruta
+                    break
+            # Intentar encontrar en PATH si no se encontró
+            if not self.isql_path:
+                self.isql_path = shutil.which('isql-fb') or shutil.which('isql') or '/usr/bin/isql-fb'
+            self.firebird_setup = None
 
         # DataStore único
         self.ds = DataStore()
@@ -2019,6 +2051,9 @@ class LiquidadorRepartidores:
         if ok and ('TEST' in stdout or 'COUNT' in stdout or stdout.strip()):
             self.lbl_estado_bd.config(text="● Conectado ✓", foreground="green")
             messagebox.showinfo("Conexión", "✓ Conexión a BD establecida correctamente")
+            
+            # Actualizar corte de cajero con la nueva BD
+            self._actualizar_corte_cajero_async()
         else:
             self.lbl_estado_bd.config(text="● Error de conexión ✗", foreground="red")
             # Mostrar error más detallado
@@ -4915,20 +4950,29 @@ ORDER BY V.FOLIO, DA.ID;
                 from corte_cajero import CorteCajeroManager
                 import database_local as db
                 
-                manager = CorteCajeroManager()
+                print(f"[DEBUG CORTE] Iniciando carga de corte cajero...")
+                print(f"[DEBUG CORTE] ruta_fdb: {self.ruta_fdb}")
+                print(f"[DEBUG CORTE] isql_path: {self.isql_path}")
+                
+                # Usar las rutas configuradas en la aplicación
+                manager = CorteCajeroManager(db_path=self.ruta_fdb, isql_path=self.isql_path)
                 
                 # Usar la fecha seleccionada o la actual
                 fecha = self.ds.fecha if hasattr(self.ds, 'fecha') and self.ds.fecha else None
+                print(f"[DEBUG CORTE] Fecha: {fecha}")
                 
                 if fecha:
                     # Obtener TODOS los turnos del día y sumar sus totales
                     turnos = manager.obtener_todos_turnos_por_fecha(fecha)
+                    print(f"[DEBUG CORTE] Turnos encontrados: {turnos}")
                     if turnos:
                         corte = manager.obtener_corte_completo_por_fecha(fecha)
                         turno_id = turnos[-1]  # Usar el último turno como referencia
                         # Mostrar cuántos turnos hay
                         num_turnos = len(turnos)
+                        print(f"[DEBUG CORTE] Corte obtenido: {corte is not None}, num_turnos: {num_turnos}")
                     else:
+                        print("[DEBUG CORTE] No se encontraron turnos, limpiando corte")
                         self.ventana.after(0, self._limpiar_corte_cajero)
                         return
                 else:
@@ -4938,6 +4982,7 @@ ORDER BY V.FOLIO, DA.ID;
                         turno_id = manager.obtener_ultimo_turno()
                     
                     if turno_id is None:
+                        print("[DEBUG CORTE] No se encontró turno actual/último")
                         self.ventana.after(0, self._limpiar_corte_cajero)
                         return
                     
@@ -4945,8 +4990,11 @@ ORDER BY V.FOLIO, DA.ID;
                     num_turnos = 1
                 
                 if corte is None:
+                    print("[DEBUG CORTE] Corte es None, limpiando")
                     self.ventana.after(0, self._limpiar_corte_cajero)
                     return
+                
+                print(f"[DEBUG CORTE] ✅ Corte cargado - Dinero en caja total: ${corte.dinero_en_caja.total:,.2f}")
                 
                 # ═══════════════════════════════════════════════════════════
                 # GUARDAR EN SQLite - Persistir los datos del corte cajero
@@ -4978,7 +5026,7 @@ ORDER BY V.FOLIO, DA.ID;
 
                 # Guardar resumen de cancelaciones por usuario en SQLite
                 from corte_cajero import obtener_cancelaciones_por_usuario
-                resumen_cancel = obtener_cancelaciones_por_usuario(self.ds.fecha)
+                resumen_cancel = obtener_cancelaciones_por_usuario(self.ds.fecha, db_path=self.ruta_fdb, isql_path=self.isql_path)
                 db.guardar_cancelaciones_usuario(self.ds.fecha, resumen_cancel)
 
                 # Actualizar GUI en el hilo principal (pasar turno_id y num_turnos para mostrar)
@@ -5182,7 +5230,8 @@ ORDER BY V.FOLIO, DA.ID;
             # Importar el módulo de corte cajero
             from corte_cajero import CorteCajeroManager
             
-            manager = CorteCajeroManager()
+            # Usar las rutas configuradas en la aplicación
+            manager = CorteCajeroManager(db_path=self.ruta_fdb, isql_path=self.isql_path)
             
             # Obtener turno actual o el último con datos
             turno_id = manager.obtener_turno_actual()
@@ -7656,22 +7705,46 @@ ORDER BY V.FOLIO, DA.ID;
         import os
         import shutil
 
-        isql_path = "/opt/firebird/bin/isql"
+        # Usar la configuración de Firebird multiplataforma
+        firebird_setup = getattr(self, 'firebird_setup', None)
+        isql_path = getattr(self, 'isql_path', None)
+        
+        if not isql_path:
+            # Buscar isql dinámicamente si no está configurado
+            posibles_rutas = [
+                '/usr/bin/isql-fb',           # Ubuntu/Debian
+                '/usr/bin/isql',
+                '/opt/firebird/bin/isql',
+            ]
+            for ruta in posibles_rutas:
+                if os.path.exists(ruta):
+                    isql_path = ruta
+                    break
+            if not isql_path:
+                isql_path = shutil.which('isql-fb') or shutil.which('isql') or '/usr/bin/isql-fb'
+        
         original_db = os.path.join(os.path.dirname(__file__), "PDVDATA.FDB")
-        user_id = os.getuid()
-        tmp_db = f"/tmp/PDVDATA_{user_id}.FDB"
-
-        # Copiar BD si no existe
-        if not os.path.exists(tmp_db):
-            shutil.copy2(original_db, tmp_db)
-            os.chmod(tmp_db, 0o666)
-
-        dsn = f"localhost:{tmp_db}"
+        
+        # En Linux, usar el archivo directamente sin servidor
+        if sys.platform != 'win32':
+            dsn = original_db  # Modo embebido, sin localhost:
+        else:
+            user_id = os.getuid() if hasattr(os, 'getuid') else 0
+            tmp_db = f"/tmp/PDVDATA_{user_id}.FDB"
+            if not os.path.exists(tmp_db):
+                shutil.copy2(original_db, tmp_db)
+                os.chmod(tmp_db, 0o666)
+            dsn = f"localhost:{tmp_db}"
 
         def ejecutar_sql(sql):
             cmd = [isql_path, "-u", "SYSDBA", "-p", "masterkey", "-ch", "UTF8", dsn]
-            proc = subprocess.run(cmd, input=sql, capture_output=True, text=True)
+            # Obtener variables de entorno para Firebird (importante para Linux)
+            env = os.environ.copy()
+            if firebird_setup:
+                env = firebird_setup.get_isql_env()
+            proc = subprocess.run(cmd, input=sql, capture_output=True, text=True, env=env)
             return proc.stdout
+
 
         # 1. Total de facturas del día (TODAS)
         sql_total = f"""
@@ -7958,16 +8031,36 @@ Estado: {estado}
         import os
         import shutil
 
-        isql_path = "/opt/firebird/bin/isql"
+        # Usar la configuración de Firebird multiplataforma
+        firebird_setup = getattr(self, 'firebird_setup', None)
+        isql_path = getattr(self, 'isql_path', None)
+        
+        if not isql_path:
+            # Buscar isql dinámicamente si no está configurado
+            posibles_rutas = [
+                '/usr/bin/isql-fb',           # Ubuntu/Debian
+                '/usr/bin/isql',
+                '/opt/firebird/bin/isql',
+            ]
+            for ruta in posibles_rutas:
+                if os.path.exists(ruta):
+                    isql_path = ruta
+                    break
+            if not isql_path:
+                isql_path = shutil.which('isql-fb') or shutil.which('isql') or '/usr/bin/isql-fb'
+        
         original_db = os.path.join(os.path.dirname(__file__), "PDVDATA.FDB")
-        user_id = os.getuid()
-        tmp_db = f"/tmp/PDVDATA_{user_id}.FDB"
-
-        if not os.path.exists(tmp_db):
-            shutil.copy2(original_db, tmp_db)
-            os.chmod(tmp_db, 0o666)
-
-        dsn = f"localhost:{tmp_db}"
+        
+        # En Linux, usar el archivo directamente sin servidor (modo embebido)
+        if sys.platform != 'win32':
+            dsn = original_db
+        else:
+            user_id = os.getuid() if hasattr(os, 'getuid') else 0
+            tmp_db = f"/tmp/PDVDATA_{user_id}.FDB"
+            if not os.path.exists(tmp_db):
+                shutil.copy2(original_db, tmp_db)
+                os.chmod(tmp_db, 0o666)
+            dsn = f"localhost:{tmp_db}"
 
         sql = f"""
 SET HEADING ON;
@@ -7989,7 +8082,11 @@ WHERE F.FOLIO = {folio_int};
 """
 
         cmd = [isql_path, "-u", "SYSDBA", "-p", "masterkey", "-ch", "UTF8", dsn]
-        proc = subprocess.run(cmd, input=sql, capture_output=True, text=True)
+        # Obtener variables de entorno para Firebird (importante para Linux)
+        env = os.environ.copy()
+        if firebird_setup:
+            env = firebird_setup.get_isql_env()
+        proc = subprocess.run(cmd, input=sql, capture_output=True, text=True, env=env)
         resultado = proc.stdout
 
         if "FOLIO" not in resultado or str(folio_int) not in resultado:
@@ -8613,40 +8710,23 @@ WHERE F.FOLIO = {folio_int};
                         "O agrega Firebird\\bin al PATH de tu sistema."
                     )
                 
-                # En Windows: NO usar sudo, ejecutar directamente
+                # En Windows: ejecutar directamente con la ruta del archivo
                 cmd = [isql_path, '-u', 'SYSDBA', '-p', 'masterkey', self.ruta_fdb]
+                env = None
             else:
-                # En Linux/Unix: conectar via TCP/IP al servidor Firebird
-                # Firebird necesita acceso al archivo, así que copiamos a /tmp
-                import shutil
-                import tempfile
+                # En Linux: usar modo embebido con Firebird 2.5 bundled
+                # Esto permite leer bases de datos ODS 11.0 sin servidor
                 
-                # Usar un nombre único en /tmp para evitar conflictos de permisos
-                tmp_fdb = f'/tmp/PDVDATA_{os.getuid()}.FDB'
+                isql_path = self.isql_path
+                firebird_setup = getattr(self, 'firebird_setup', None)
                 
-                # Intentar copiar el archivo
-                try:
-                    # Si el archivo temporal existe y podemos escribir, lo eliminamos primero
-                    if os.path.exists(tmp_fdb):
-                        try:
-                            os.remove(tmp_fdb)
-                        except:
-                            pass
-                    
-                    if os.path.exists(self.ruta_fdb):
-                        shutil.copy2(self.ruta_fdb, tmp_fdb)
-                        # Dar permisos completos al archivo
-                        os.chmod(tmp_fdb, 0o666)
-                except Exception as e:
-                    return False, "", f"Error copiando archivo a /tmp: {str(e)}"
+                # Obtener variables de entorno para Firebird embebido
+                env = os.environ.copy()
+                if firebird_setup:
+                    env = firebird_setup.get_isql_env()
                 
-                # Usar siempre /tmp para la conexión TCP/IP
-                fdb_path = tmp_fdb
-                
-                # El comando de isql para conexión TCP/IP
-                cmd = [self.isql_path]
-                # El SQL debe incluir el CONNECT con localhost
-                sql = f"CONNECT 'localhost:{fdb_path}' USER 'SYSDBA' PASSWORD 'masterkey';\n" + sql
+                # Comando para modo embebido: usar la ruta directa del archivo (sin localhost:)
+                cmd = [isql_path, '-u', 'SYSDBA', '-p', 'masterkey', self.ruta_fdb]
             
             # Agregar QUIT al final del SQL para que isql termine correctamente
             sql_completo = sql.strip()
@@ -8665,36 +8745,28 @@ WHERE F.FOLIO = {folio_int};
                 text=True,
                 timeout=30,
                 encoding=encoding_usar,
-                errors='ignore'  # Ignorar errores de codificación
+                errors='ignore',  # Ignorar errores de codificación
+                env=env  # Usar variables de entorno configuradas
             )
             
-            # En Linux con conexión TCP/IP, isql siempre muestra "Use CONNECT..." en stderr
-            # pero eso no es un error si hay datos válidos en stdout
             stdout = resultado.stdout or ""
             stderr = resultado.stderr or ""
             
             # Verificar si hay datos válidos en la salida
-            # Buscar líneas de separación (===) o datos numéricos típicos de resultados
             tiene_datos = '===' in stdout or any(
                 keyword in stdout.upper() for keyword in ['COUNT', 'FOLIO', 'NOMBRE', 'TOTAL', 'SUBTOTAL']
             )
             
-            # También verificar si hay líneas con datos numéricos (típico de resultados)
+            # También verificar si hay líneas con datos numéricos
             if not tiene_datos:
                 for linea in stdout.split('\n'):
                     linea = linea.strip()
-                    # Si hay una línea con números que parece ser un resultado de consulta
                     if linea and any(c.isdigit() for c in linea) and not linea.startswith('Use '):
                         tiene_datos = True
                         break
             
             # Es exitoso si: returncode es 0, O si hay datos válidos en stdout
             exito = resultado.returncode == 0 or tiene_datos
-            
-            # Si hay datos válidos, limpiar el stderr del mensaje "Use CONNECT..."
-            # ya que ese mensaje no es un error real cuando hay datos
-            if tiene_datos and 'Use CONNECT' in stderr:
-                stderr = ""
             
             return exito, stdout, stderr
             
