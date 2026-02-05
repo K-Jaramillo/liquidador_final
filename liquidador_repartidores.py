@@ -5175,6 +5175,11 @@ ORDER BY V.FOLIO, DA.ID;
                      foreground="#ffffff", font=("Segoe UI", 9, "bold")).grid(row=row, column=0, sticky=tk.W)
             ttk.Label(self.frame_cancel_usuarios, text=f"${devoluciones_efectivo:,.2f}", 
                      font=("Segoe UI", 9, "bold"), foreground="#ff8a80").grid(row=row, column=1, sticky=tk.E, padx=(10, 0))
+            
+            # Actualizar Canceladas otro día (informativo, TOTAL no subtotal)
+            total_canceladas_otro_dia = self.ds.get_total_canceladas_otro_dia()
+            if hasattr(self, 'lbl_total_canceladas_otro_dia'):
+                self.lbl_total_canceladas_otro_dia.config(text=f"${total_canceladas_otro_dia:,.2f}")
                 
         except Exception as e:
             print(f"⚠️ Error al actualizar cancelaciones por usuario: {e}")
