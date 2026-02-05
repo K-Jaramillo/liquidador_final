@@ -75,10 +75,8 @@ class Config:
     @classmethod
     def get_fdb_path(cls):
         """Obtiene la ruta del archivo FDB según el SO."""
-        if sys.platform == 'win32':
-            return r'c:\Users\UsoPersonal\Desktop\Repartidores\PDVDATA.FDB'
-        else:
-            return os.path.join(cls.get_base_path(), 'PDVDATA.FDB')
+        # Ruta de la BD real con datos actualizados
+        return r'D:\BD\PDVDATA.FDB'
     
     @classmethod
     def get_isql_path(cls):

@@ -11,7 +11,8 @@ print("=" * 60)
 print()
 
 # 1. Verificar si isql.exe existe
-ruta_fdb = r"c:\Users\UsoPersonal\Desktop\Repartidores\PDVDATA.FDB"
+# Usar ruta relativa al proyecto
+ruta_fdb = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'PDVDATA.FDB')
 isql_paths = [
     r"C:\Program Files (x86)\Firebird\Firebird_2_5\bin\isql.exe",
     r"C:\Program Files\Firebird\Firebird_2_5\bin\isql.exe",
