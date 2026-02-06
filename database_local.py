@@ -107,12 +107,22 @@ Almacena: asignaciones, descuentos, gastos, conteo de dinero, configuración
 
 import sqlite3
 import os
+import sys
 import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 # Ruta de la base de datos local
-DB_PATH = os.path.join(os.path.dirname(__file__), "liquidador_data.db")
+# IMPORTANTE: Detectar si estamos en un .exe compilado o ejecutando como script
+if getattr(sys, 'frozen', False):
+    # Ejecutando como .exe compilado con PyInstaller
+    # La BD se guarda junto al ejecutable, NO en la carpeta temporal
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # Ejecutando como script Python normal
+    BASE_DIR = os.path.dirname(__file__)
+
+DB_PATH = os.path.join(BASE_DIR, "liquiventas_data.db")
 
 
 def get_connection():

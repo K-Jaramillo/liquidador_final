@@ -183,8 +183,16 @@ def _buscar_isql():
             return ruta
     return r"C:\Program Files\Firebird\Firebird_5_0\isql.exe"
 
+def _obtener_fdb_path():
+    """Obtiene la ruta del FDB desde la configuración guardada."""
+    try:
+        from core.config import Config
+        return Config.get_fdb_path()
+    except Exception:
+        return r"D:\LiquiVentas\BDEV\PDVDATA.FDB"
+
 ISQL_PATH_DEFAULT = _buscar_isql()
-DB_PATH_DEFAULT = r"D:\BD\PDVDATA.FDB"
+DB_PATH_DEFAULT = _obtener_fdb_path()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

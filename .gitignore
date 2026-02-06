@@ -12,7 +12,7 @@ __pycache__/
 
 # Database files (local)
 *.db
-liquidador_data.db
+liquiventas_data.db
 
 # IDE
 .idea/
@@ -32,3 +32,6 @@ dist/
 build/
 *.egg-info/
 PDVDATA.FDB
+*.exe
+*.rar
+DISTRIBUIR/

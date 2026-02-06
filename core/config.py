@@ -10,8 +10,8 @@ class Config:
     """Configuración centralizada de la aplicación."""
     
     # Versión de la aplicación
-    VERSION = "2.1.0"
-    APP_NAME = "Liquidador de Repartidores"
+    VERSION = "3.0.0"
+    APP_NAME = "LiquiVentas"
     
     # Colores del tema profesional
     COLORS = {
@@ -67,16 +67,38 @@ class Config:
     # Filas de tabla
     TREEVIEW_ROW_HEIGHT = 28
     
+    # Ruta por defecto de la BD Firebird (relativa a donde se instale LiquiVentas)
+    DEFAULT_FDB_PATH = r'D:\LiquiVentas\BDEV\PDVDATA.FDB'
+    
     @classmethod
     def get_base_path(cls):
         """Obtiene la ruta base de la aplicación."""
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     @classmethod
     def get_fdb_path(cls):
-        """Obtiene la ruta del archivo FDB según el SO."""
-        # Ruta de la BD real con datos actualizados
-        return r'D:\BD\PDVDATA.FDB'
+        """Obtiene la ruta del archivo FDB desde la configuración guardada."""
+        try:
+            # Importar aquí para evitar importación circular
+            import database_local as db
+            ruta_guardada = db.obtener_config('fdb_path')
+            if ruta_guardada and os.path.exists(ruta_guardada):
+                return ruta_guardada
+        except Exception:
+            pass
+        # Ruta por defecto
+        return cls.DEFAULT_FDB_PATH
+    
+    @classmethod
+    def set_fdb_path(cls, ruta: str) -> bool:
+        """Guarda la ruta del archivo FDB en la configuración."""
+        try:
+            import database_local as db
+            return db.guardar_config('fdb_path', ruta)
+        except Exception:
+            return False
     
     @classmethod
     def get_isql_path(cls):

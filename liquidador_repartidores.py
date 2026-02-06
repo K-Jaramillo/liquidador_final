@@ -614,14 +614,53 @@ class LiquidadorRepartidores:
 
     def __init__(self, ventana: tk.Tk):
         self.ventana = ventana
-        self.ventana.title("Liquidador de Repartidores v2")
+        self.ventana.title("LiquiVentas v3.0")
         self.ventana.geometry("1350x950")
         self.ventana.minsize(1100, 800)
 
-        # Rutas BD (ajusta según tu entorno)
+        # Cargar ruta FDB desde configuración
+        self._cargar_configuracion_rutas()
+        
+        # DataStore único
+        self.ds = DataStore()
+
+        # Variable compartida para repartidor filtro en Liquidación
+        self.repartidor_filtro_var = tk.StringVar()
+
+        # Editor inline activo (referencia para destruirlo si existe)
+        self._editor_activo = None
+
+        # Crear barra de menú
+        self._crear_menu_principal()
+        
+        self._crear_interfaz()
+
+        # Suscribir las pestañas al DataStore
+        self.ds.suscribir(self._on_data_changed)
+        
+        # Configurar estilos mejorados
+        self._configurar_estilos()
+        
+        # Cargar datos de la fecha actual al iniciar (con pequeño delay para que la GUI esté lista)
+        self.ventana.after(500, self._cargar_datos_inicial)
+    
+    def _cargar_configuracion_rutas(self):
+        """Carga las rutas de BD desde la configuración guardada."""
+        # Ruta por defecto para LiquiVentas
+        RUTA_FDB_DEFAULT = r'D:\LiquiVentas\BDEV\PDVDATA.FDB'
+        
         # Detectar automáticamente el sistema operativo
         if sys.platform == 'win32':
-            self.ruta_fdb = r'D:\BD\PDVDATA.FDB'
+            # Intentar cargar ruta FDB desde configuración
+            try:
+                ruta_guardada = db_local.obtener_config('fdb_path')
+                if ruta_guardada and os.path.exists(ruta_guardada):
+                    self.ruta_fdb = ruta_guardada
+                else:
+                    self.ruta_fdb = RUTA_FDB_DEFAULT
+            except Exception:
+                self.ruta_fdb = RUTA_FDB_DEFAULT
+            
             # Buscar isql en múltiples ubicaciones posibles
             posibles_rutas = [
                 r'C:\Program Files\Firebird\Firebird_5_0\isql.exe',
@@ -643,26 +682,73 @@ class LiquidadorRepartidores:
             # Linux
             self.ruta_fdb = os.path.join(os.path.dirname(__file__), 'PDVDATA.FDB')
             self.isql_path = '/opt/firebird/bin/isql'
-
-        # DataStore único
-        self.ds = DataStore()
-
-        # Variable compartida para repartidor filtro en Liquidación
-        self.repartidor_filtro_var = tk.StringVar()
-
-        # Editor inline activo (referencia para destruirlo si existe)
-        self._editor_activo = None
-
-        self._crear_interfaz()
-
-        # Suscribir las pestañas al DataStore
-        self.ds.suscribir(self._on_data_changed)
+    
+    def _crear_menu_principal(self):
+        """Crea la barra de menú principal."""
+        menubar = tk.Menu(self.ventana)
         
-        # Configurar estilos mejorados
-        self._configurar_estilos()
+        # Menú Archivo
+        menu_archivo = tk.Menu(menubar, tearoff=0)
+        menu_archivo.add_command(label="⚙️ Configurar Ruta BD", command=self._configurar_ruta_fdb)
+        menu_archivo.add_separator()
+        menu_archivo.add_command(label="📂 Abrir Carpeta de Datos", command=self._abrir_carpeta_datos)
+        menu_archivo.add_separator()
+        menu_archivo.add_command(label="❌ Salir", command=self.ventana.quit)
+        menubar.add_cascade(label="Archivo", menu=menu_archivo)
         
-        # Cargar datos de la fecha actual al iniciar (con pequeño delay para que la GUI esté lista)
-        self.ventana.after(500, self._cargar_datos_inicial)
+        # Menú Ayuda
+        menu_ayuda = tk.Menu(menubar, tearoff=0)
+        menu_ayuda.add_command(label="ℹ️ Acerca de", command=self._mostrar_acerca_de)
+        menubar.add_cascade(label="Ayuda", menu=menu_ayuda)
+        
+        self.ventana.config(menu=menubar)
+    
+    def _configurar_ruta_fdb(self):
+        """Permite seleccionar la ruta del archivo PDVDATA.FDB."""
+        from tkinter import filedialog
+        
+        ruta_actual = self.ruta_fdb
+        nueva_ruta = filedialog.askopenfilename(
+            title="Seleccionar Base de Datos Eleventa (PDVDATA.FDB)",
+            initialdir=os.path.dirname(ruta_actual) if os.path.exists(os.path.dirname(ruta_actual)) else "D:\\",
+            filetypes=[("Base de datos Firebird", "*.FDB"), ("Todos los archivos", "*.*")]
+        )
+        
+        if nueva_ruta:
+            # Guardar en configuración
+            try:
+                db_local.guardar_config('fdb_path', nueva_ruta)
+                self.ruta_fdb = nueva_ruta
+                messagebox.showinfo(
+                    "Configuración Guardada", 
+                    f"Nueva ruta de BD configurada:\n{nueva_ruta}\n\nLa aplicación usará esta ruta en próximas consultas."
+                )
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo guardar la configuración:\n{e}")
+    
+    def _abrir_carpeta_datos(self):
+        """Abre la carpeta donde está el archivo de datos SQLite."""
+        import subprocess
+        if sys.platform == 'win32':
+            carpeta = os.path.dirname(db_local.DB_PATH)
+            subprocess.Popen(f'explorer "{carpeta}"')
+        else:
+            carpeta = os.path.dirname(db_local.DB_PATH)
+            subprocess.Popen(['xdg-open', carpeta])
+    
+    def _mostrar_acerca_de(self):
+        """Muestra información de la aplicación."""
+        info = (
+            "LiquiVentas v3.0\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Sistema de Liquidación de Repartidores\n\n"
+            f"📁 Ruta BD Eleventa:\n{self.ruta_fdb}\n\n"
+            f"💾 Datos locales:\n{db_local.DB_PATH}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Desarrollado por K-Jaramillo\n"
+            "Febrero 2026"
+        )
+        messagebox.showinfo("Acerca de LiquiVentas", info)
     
     def _cargar_datos_inicial(self):
         """Carga los datos de la fecha actual al iniciar la aplicación."""
