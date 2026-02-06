@@ -58,6 +58,19 @@ class TabOrdenes:
         self.bot_app = None
         self.loop = None
         
+        # Sesiones de usuarios (para guardar cliente seleccionado)
+        # {user_id: {'cliente': 'nombre', 'productos': [], 'timestamp': datetime}}
+        self.user_sessions = {}
+        
+        # ════════════════════════════════════════════════════════════════
+        # CACHÉ DE PRODUCTOS Y CLIENTES DE LA BD
+        # ════════════════════════════════════════════════════════════════
+        self.productos_cache = []  # Lista de (codigo, descripcion, stock, precio)
+        self.clientes_cache = []   # Lista de nombres de clientes
+        self.productos_por_dimension = {}  # {'8x12': [(cod, desc, stock, precio), ...]}
+        self.productos_por_color = {}      # {'negra': [(cod, desc, stock, precio), ...]}
+        self.productos_por_tipo_t = {}     # {'T15': [(cod, desc, stock, precio), ...]}
+        
         # Variables de configuración
         self.token_var = None
         self.status_var = None
@@ -72,6 +85,9 @@ class TabOrdenes:
         self._crear_interfaz()
         self._cargar_config()
         self._cargar_ordenes()
+        
+        # Cargar caché de productos en segundo plano
+        self._cargar_cache_bd()
     
     def _fecha_actual(self) -> str:
         """Retorna la fecha actual del DataStore."""
@@ -425,12 +441,268 @@ class TabOrdenes:
                            f"Orden #{orden_id} marcada como procesada")
     
     # ══════════════════════════════════════════════════════════════════
+    # CACHÉ DE PRODUCTOS Y CLIENTES
+    # ══════════════════════════════════════════════════════════════════
+    
+    def _cargar_cache_bd(self):
+        """
+        Carga productos y clientes de la BD Firebird en memoria.
+        Esto permite parseo inteligente de pedidos.
+        """
+        try:
+            if not hasattr(self.app, '_ejecutar_sql'):
+                return
+            
+            # ═══════════════════════════════════════════════════════════
+            # CARGAR TODOS LOS PRODUCTOS
+            # ═══════════════════════════════════════════════════════════
+            sql_productos = """
+                SET HEADING ON;
+                SELECT CODIGO, DESCRIPCION, DINVENTARIO, PVENTA 
+                FROM PRODUCTOS 
+                ORDER BY DESCRIPCION;
+            """
+            ok, stdout, stderr = self.app._ejecutar_sql(sql_productos)
+            if ok and stdout:
+                self.productos_cache = []
+                self.productos_por_dimension = {}
+                self.productos_por_color = {}
+                self.productos_por_tipo_t = {}
+                
+                for linea in stdout.split('\n'):
+                    linea = linea.strip()
+                    if not linea or linea.startswith('=') or 'CODIGO' in linea:
+                        continue
+                    
+                    partes = linea.split()
+                    if len(partes) >= 4:
+                        try:
+                            codigo = partes[0]
+                            precio = float(partes[-1]) if partes[-1].replace('.','').isdigit() else 0
+                            stock_str = partes[-2]
+                            stock = int(float(stock_str)) if stock_str != '<null>' and stock_str.replace('.','').isdigit() else 0
+                            descripcion = ' '.join(partes[1:-2])
+                            
+                            prod = (codigo, descripcion, stock, precio)
+                            self.productos_cache.append(prod)
+                            
+                            # ══════════════════════════════════════════════════════
+                            # Indexar por dimensiones (múltiples formatos)
+                            # Ejemplos: 8X12, 10X14, 24X32X10, 24X32X100
+                            # ══════════════════════════════════════════════════════
+                            
+                            # Formato básico: NxN (8X12, 10X14, etc)
+                            dim_match = re.search(r'(\d{1,2})\s*[xX]\s*(\d{1,2})', descripcion)
+                            if dim_match:
+                                dim = f"{dim_match.group(1)}X{dim_match.group(2)}"
+                                if dim not in self.productos_por_dimension:
+                                    self.productos_por_dimension[dim] = []
+                                self.productos_por_dimension[dim].append(prod)
+                            
+                            # Formato extendido: NxNxN (24X32X10, 26X40X100)
+                            dim_ext_match = re.search(r'(\d{1,2})\s*[xX]\s*(\d{1,2})\s*[xX]\s*(\d+)', descripcion)
+                            if dim_ext_match:
+                                # Indexar también como dimensión base (24X32)
+                                dim_base = f"{dim_ext_match.group(1)}X{dim_ext_match.group(2)}"
+                                if dim_base not in self.productos_por_dimension:
+                                    self.productos_por_dimension[dim_base] = []
+                                if prod not in self.productos_por_dimension[dim_base]:
+                                    self.productos_por_dimension[dim_base].append(prod)
+                            
+                            # También indexar por código si parece dimensión (2432 = 24x32)
+                            # Solo si el código es numérico y tiene formato de dimensión válida
+                            if re.match(r'^\d{3,4}$', codigo):
+                                if len(codigo) == 4:
+                                    d1, d2 = int(codigo[:2]), int(codigo[2:])
+                                    # Solo dimensiones razonables (5-50 pulgadas)
+                                    if 5 <= d1 <= 50 and 5 <= d2 <= 50:
+                                        cod_dim = f"{d1}X{d2}"
+                                        if cod_dim not in self.productos_por_dimension:
+                                            self.productos_por_dimension[cod_dim] = []
+                                        if prod not in self.productos_por_dimension[cod_dim]:
+                                            self.productos_por_dimension[cod_dim].append(prod)
+                                elif len(codigo) == 3:
+                                    d1, d2 = int(codigo[0]), int(codigo[1:])
+                                    if 4 <= d1 <= 9 and 5 <= d2 <= 30:
+                                        cod_dim = f"{d1}X{d2}"
+                                        if cod_dim not in self.productos_por_dimension:
+                                            self.productos_por_dimension[cod_dim] = []
+                                        if prod not in self.productos_por_dimension[cod_dim]:
+                                            self.productos_por_dimension[cod_dim].append(prod)
+                            
+                            # Indexar por color/tipo
+                            desc_upper = descripcion.upper()
+                            for color in ['NEGRA', 'BLANCA', 'OPACA', 'HERMETICA', 'LISA', 'PERFORADA', 
+                                         'DECORADA', 'BASURERA', 'UNICOLOR', 'VERDE', 'ROJA']:
+                                if color in desc_upper:
+                                    color_key = color.lower()
+                                    if color_key not in self.productos_por_color:
+                                        self.productos_por_color[color_key] = []
+                                    self.productos_por_color[color_key].append(prod)
+                            
+                            # ══════════════════════════════════════════════════════
+                            # Indexar bolsas tipo T (T15, T20, T25, T30, T40, T50)
+                            # Ejemplos: "T 15 BLANCO", "T 25 NEGRA FINA", "T 30 BLANCO ECO"
+                            # ══════════════════════════════════════════════════════
+                            t_match = re.search(r'\bT\s*(\d+)\b', desc_upper)
+                            if t_match:
+                                t_num = t_match.group(1)
+                                t_key = f"T{t_num}"  # T15, T20, T25, etc.
+                                if t_key not in self.productos_por_tipo_t:
+                                    self.productos_por_tipo_t[t_key] = []
+                                self.productos_por_tipo_t[t_key].append(prod)
+                        except:
+                            pass
+            
+            # ═══════════════════════════════════════════════════════════
+            # CARGAR CLIENTES ÚNICOS
+            # ═══════════════════════════════════════════════════════════
+            sql_clientes = """
+                SET HEADING ON;
+                SELECT DISTINCT NOMBRE FROM VENTATICKETS 
+                WHERE NOMBRE IS NOT NULL AND NOMBRE <> ''
+                ORDER BY NOMBRE;
+            """
+            ok, stdout, stderr = self.app._ejecutar_sql(sql_clientes)
+            if ok and stdout:
+                self.clientes_cache = []
+                for linea in stdout.split('\n'):
+                    linea = linea.strip()
+                    if linea and not linea.startswith('=') and 'NOMBRE' not in linea:
+                        if linea != '<null>' and not linea.startswith('Ticket '):
+                            self.clientes_cache.append(linea)
+            
+            print(f"[CACHE] Cargados {len(self.productos_cache)} productos, {len(self.clientes_cache)} clientes")
+            print(f"[CACHE] Dimensiones indexadas: {list(self.productos_por_dimension.keys())[:10]}...")
+            print(f"[CACHE] Tipos T indexados: {list(self.productos_por_tipo_t.keys())}")
+            
+        except Exception as e:
+            print(f"[CACHE] Error cargando caché: {e}")
+    
+    def _buscar_en_cache(self, texto: str, dimensiones: str = None, color: str = None) -> List[Tuple]:
+        """
+        Busca productos en el caché local usando código, dimensiones, color y tipo T.
+        Retorna lista de (codigo, descripcion, stock, precio).
+        """
+        resultados = []
+        texto_upper = texto.upper().strip() if texto else ''
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PASO 1: Buscar por código exacto primero
+        # ═══════════════════════════════════════════════════════════════
+        if texto_upper and self.productos_cache:
+            for prod in self.productos_cache:
+                if prod[0].upper() == texto_upper:  # Código exacto
+                    resultados.append(prod)
+                    return resultados  # Encontró código exacto, retornar
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PASO 1.5: Buscar bolsas tipo T (T15, T20, T25, T30, T40, T50)
+        # Formatos: "T15", "T 15", "t15", "T-15", etc.
+        # ═══════════════════════════════════════════════════════════════
+        if texto_upper:
+            t_match = re.search(r'\bT\s*[-]?\s*(\d+)\b', texto_upper)
+            if t_match:
+                t_num = t_match.group(1)
+                t_key = f"T{t_num}"
+                if t_key in self.productos_por_tipo_t:
+                    candidatos = self.productos_por_tipo_t[t_key]
+                    if color:
+                        color_upper = color.upper()
+                        resultados = [p for p in candidatos if color_upper in p[1].upper()]
+                    else:
+                        resultados = list(candidatos)
+                    if resultados:
+                        return resultados[:10]
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PASO 2: Buscar por dimensiones específicas
+        # ═══════════════════════════════════════════════════════════════
+        if dimensiones:
+            dim_key = dimensiones.upper().replace(' ', '').replace('X', 'X')
+            
+            # Buscar dimensión exacta
+            if dim_key in self.productos_por_dimension:
+                candidatos = self.productos_por_dimension[dim_key]
+                if color:
+                    color_upper = color.upper()
+                    resultados = [p for p in candidatos if color_upper in p[1].upper()]
+                else:
+                    resultados = list(candidatos)
+            
+            # Si no encontró exacta, buscar dimensiones similares
+            if not resultados:
+                # Extraer números de la dimensión buscada
+                dim_parts = re.findall(r'\d+', dim_key)
+                if len(dim_parts) >= 2:
+                    d1, d2 = int(dim_parts[0]), int(dim_parts[1])
+                    
+                    # Buscar dimensiones cercanas (±1)
+                    variantes = [
+                        f"{d1}X{d2}", f"{d1}X{d2-1}", f"{d1}X{d2+1}",
+                        f"{d1-1}X{d2}", f"{d1+1}X{d2}"
+                    ]
+                    for var in variantes:
+                        if var in self.productos_por_dimension:
+                            candidatos = self.productos_por_dimension[var]
+                            if color:
+                                matches = [p for p in candidatos if color.upper() in p[1].upper()]
+                                resultados.extend(matches)
+                            else:
+                                resultados.extend(candidatos)
+                    
+                    # También buscar formatos con tercer número (24X32X10, 24X32X50, etc)
+                    for dim_cache, prods in self.productos_por_dimension.items():
+                        if dim_cache.startswith(f"{d1}X{d2}") or dim_cache.startswith(f"{d1}X{d2-1}") or dim_cache.startswith(f"{d1}X{d2+1}"):
+                            for p in prods:
+                                if p not in resultados:
+                                    if color:
+                                        if color.upper() in p[1].upper():
+                                            resultados.append(p)
+                                    else:
+                                        resultados.append(p)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PASO 3: Buscar por color si no hay dimensiones
+        # ═══════════════════════════════════════════════════════════════
+        if not resultados and color:
+            color_key = color.lower()
+            if color_key in self.productos_por_color:
+                resultados = list(self.productos_por_color[color_key])
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PASO 4: Búsqueda general por texto
+        # ═══════════════════════════════════════════════════════════════
+        if not resultados and texto_upper:
+            for prod in self.productos_cache:
+                # Buscar en código o descripción
+                if texto_upper in prod[0].upper() or texto_upper in prod[1].upper():
+                    resultados.append(prod)
+                    if len(resultados) >= 10:
+                        break
+        
+        return resultados[:10]
+    
+    # ══════════════════════════════════════════════════════════════════
     # FUNCIONES DE CONSULTA A BASE DE DATOS FIREBIRD
     # ══════════════════════════════════════════════════════════════════
     
     def _buscar_clientes_similares(self, texto: str, limite: int = 5) -> List[str]:
-        """Busca clientes similares en la base de datos Firebird."""
+        """Busca clientes similares, primero en caché, luego en BD."""
         clientes = []
+        texto_upper = texto.upper().strip()
+        
+        # Buscar primero en caché (más rápido)
+        if self.clientes_cache:
+            for cliente in self.clientes_cache:
+                if texto_upper in cliente.upper():
+                    clientes.append(cliente)
+                    if len(clientes) >= limite:
+                        break
+            if clientes:
+                return clientes[:limite]
+        
+        # Si no hay caché o no encontró, buscar en BD
         try:
             if hasattr(self.app, '_ejecutar_sql'):
                 sql = f"""
@@ -567,6 +839,19 @@ class TabOrdenes:
                 cliente = primera_linea
                 productos_texto = resto
         
+        # Si no se detectó cliente y el texto parece ser un nombre (sin números, corto)
+        # Tratarlo como cliente potencial
+        if not cliente and texto:
+            # Verificar si es texto corto sin números (probable nombre de cliente)
+            tiene_numeros = any(c.isdigit() for c in texto)
+            es_corto = len(texto) < 60
+            tiene_palabras = len(texto.split()) <= 6
+            
+            if not tiene_numeros and es_corto and tiene_palabras and len(texto) >= 2:
+                # Es muy probable que sea un nombre de cliente
+                cliente = texto
+                productos_texto = ''
+        
         resultado['cliente'] = cliente
         resultado['productos_texto'] = productos_texto
         resultado['productos'] = self._parsear_lineas_productos(productos_texto)
@@ -579,7 +864,15 @@ class TabOrdenes:
         return resultado
     
     def _parsear_lineas_productos(self, texto: str) -> List[Dict]:
-        """Parsea líneas de productos con cantidades."""
+        """
+        Parsea líneas de productos con cantidades.
+        Interpreta formatos especiales:
+        - t15, t20, t25, t30, t40, t50, t 15 = bolsas por paquetes de 100
+        - 812, 8x12, 8 x 12 = dimensiones de bolsa (8x12 pulgadas)
+        - 1216, 12x16 = dimensiones de bolsa
+        - millar, millares = 1000 unidades
+        - docena = 12 unidades
+        """
         productos = []
         lineas = re.split(r'[,\n]', texto)
         
@@ -588,31 +881,241 @@ class TabOrdenes:
             if not linea:
                 continue
             
-            producto = {'nombre': linea, 'cantidad': 1, 'original': linea}
+            producto = {
+                'nombre': linea, 
+                'cantidad': 1, 
+                'original': linea,
+                'unidad': 'paq',  # Por defecto paquetes (bolsas)
+                'nota': '',
+                'dimensiones': None,
+                'tamano_t': None,
+                'color': None
+            }
             
-            patrones = [
-                r'^(\d+)\s+(.+)$',
-                r'^(.+?)\s*[xX]\s*(\d+)$',
-                r'^(.+?)\s*\((\d+)\)$',
-                r'^(.+?)\s+(\d+)\s*[uU]?$',
-            ]
+            linea_trabajo = linea
             
-            for patron in patrones:
-                match = re.match(patron, linea)
-                if match:
-                    grupos = match.groups()
-                    if patron == patrones[0]:
-                        producto['cantidad'] = int(grupos[0])
-                        producto['nombre'] = grupos[1].strip()
-                    else:
-                        producto['nombre'] = grupos[0].strip()
-                        producto['cantidad'] = int(grupos[1])
+            # ═══════════════════════════════════════════════════════════
+            # EXTRAER CANTIDAD (al inicio de la línea)
+            # ═══════════════════════════════════════════════════════════
+            cantidad_match = re.match(r'^(\d+)\s+(.+)$', linea_trabajo)
+            if cantidad_match:
+                producto['cantidad'] = int(cantidad_match.group(1))
+                linea_trabajo = cantidad_match.group(2).strip()
+            
+            # ═══════════════════════════════════════════════════════════
+            # DETECTAR DIMENSIONES DE BOLSA
+            # Formatos: 812, 8x12, 8 x 12, 8X12, 1216, 12x16, etc.
+            # ═══════════════════════════════════════════════════════════
+            
+            # Formato compacto: 812 = 8x12, 1216 = 12x16, 1620 = 16x20
+            dim_compacta = re.search(r'\b(\d{1,2})(\d{2})\b', linea_trabajo)
+            if dim_compacta:
+                d1 = dim_compacta.group(1)
+                d2 = dim_compacta.group(2)
+                # Verificar que sean dimensiones válidas (no años ni códigos largos)
+                if int(d1) <= 30 and int(d2) <= 40:
+                    producto['dimensiones'] = f"{d1}x{d2}"
+                    producto['nota'] = f"Bolsa {d1}x{d2} (paq 100)"
+                    # Remover del texto para buscar color/tipo
+                    linea_trabajo = re.sub(r'\b\d{3,4}\b', '', linea_trabajo, count=1).strip()
+            
+            # Formato explícito: 8x12, 8 x 12, 8X12
+            dim_explicita = re.search(r'\b(\d{1,2})\s*[xX]\s*(\d{1,2})\b', linea_trabajo)
+            if dim_explicita and not producto['dimensiones']:
+                d1 = dim_explicita.group(1)
+                d2 = dim_explicita.group(2)
+                producto['dimensiones'] = f"{d1}x{d2}"
+                producto['nota'] = f"Bolsa {d1}x{d2} (paq 100)"
+                linea_trabajo = re.sub(r'\b\d{1,2}\s*[xX]\s*\d{1,2}\b', '', linea_trabajo).strip()
+            
+            # ═══════════════════════════════════════════════════════════
+            # DETECTAR TAMAÑO T (t15, t20, t25, t30, t40, t50, t 15)
+            # ═══════════════════════════════════════════════════════════
+            tamano_match = re.search(r'\b[tT]\s*(\d+)\b', linea_trabajo)
+            if tamano_match:
+                tamano = tamano_match.group(1)
+                producto['tamano_t'] = tamano
+                producto['nota'] = f"Bolsa T{tamano} (paq 100)"
+                linea_trabajo = re.sub(r'\b[tT]\s*\d+\b', '', linea_trabajo).strip()
+            
+            # ═══════════════════════════════════════════════════════════
+            # DETECTAR COLOR/TIPO
+            # ═══════════════════════════════════════════════════════════
+            colores = ['negra', 'negro', 'blanca', 'blanco', 'opaca', 'opaco', 
+                      'transparente', 'trans', 'cristal', 'roja', 'rojo',
+                      'azul', 'verde', 'amarilla', 'amarillo', 'natural',
+                      'perf', 'perforada', 'perforado', 'gruesa', 'grueso',
+                      'delgada', 'delgado', 'biodegradable', 'bio']
+            
+            for color in colores:
+                if re.search(rf'\b{color}\b', linea_trabajo, re.IGNORECASE):
+                    producto['color'] = color.lower()
                     break
             
-            if producto['nombre']:
+            # ═══════════════════════════════════════════════════════════
+            # DETECTAR MILLARES/DOCENAS
+            # ═══════════════════════════════════════════════════════════
+            if re.search(r'\bmillares?\b', linea_trabajo, re.IGNORECASE):
+                producto['unidad'] = 'millar'
+                producto['nota'] += ' (x1000)'
+                linea_trabajo = re.sub(r'\bmillares?\b', '', linea_trabajo, flags=re.IGNORECASE)
+            
+            if re.search(r'\bdocenas?\b', linea_trabajo, re.IGNORECASE):
+                producto['unidad'] = 'docena'
+                producto['nota'] += ' (x12)'
+                linea_trabajo = re.sub(r'\bdocenas?\b', '', linea_trabajo, flags=re.IGNORECASE)
+            
+            # Guardar nombre limpio para búsqueda
+            producto['nombre'] = linea_trabajo.strip() if linea_trabajo.strip() else linea
+            
+            if producto['nombre'] or producto['dimensiones'] or producto['tamano_t']:
                 productos.append(producto)
         
         return productos
+    
+    def _buscar_producto_en_bd(self, texto_producto: str, limite: int = 5, 
+                                producto_parseado: Dict = None) -> List[Tuple]:
+        """
+        Busca productos usando caché local y BD Firebird.
+        Maneja códigos, dimensiones (8x12, 812), tamaños T, colores y tipos.
+        """
+        productos_encontrados = []
+        
+        # Si tenemos producto parseado, usar su información
+        dimensiones = None
+        tamano_t = None
+        color = None
+        
+        if producto_parseado:
+            dimensiones = producto_parseado.get('dimensiones')
+            tamano_t = producto_parseado.get('tamano_t')
+            color = producto_parseado.get('color')
+        else:
+            # Extraer información del texto directamente
+            # Dimensiones compactas: 812, 1216
+            dim_match = re.search(r'\b(\d{1,2})(\d{2})\b', texto_producto)
+            if dim_match:
+                d1, d2 = dim_match.group(1), dim_match.group(2)
+                if int(d1) <= 30 and int(d2) <= 40:
+                    dimensiones = f"{d1}x{d2}"
+            
+            # Dimensiones explícitas: 8x12
+            if not dimensiones:
+                dim_match = re.search(r'\b(\d{1,2})\s*[xX]\s*(\d{1,2})\b', texto_producto)
+                if dim_match:
+                    dimensiones = f"{dim_match.group(1)}x{dim_match.group(2)}"
+            
+            # Tamaño T
+            t_match = re.search(r'\b[tT]\s*(\d+)\b', texto_producto)
+            if t_match:
+                tamano_t = t_match.group(1)
+            
+            # Color/Tipo
+            tipos = ['negra', 'negro', 'blanca', 'blanco', 'opaca', 'opaco', 
+                    'transparente', 'trans', 'cristal', 'perf', 'perforada',
+                    'hermetica', 'lisa', 'tb lisa', 'decorada', 'basurera', 'unicolor']
+            for c in tipos:
+                if re.search(rf'\b{c}\b', texto_producto, re.IGNORECASE):
+                    color = c.split()[0]  # Solo la primera palabra
+                    break
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PASO 1: Buscar en caché local (más rápido)
+        # ═══════════════════════════════════════════════════════════════
+        if self.productos_cache:
+            resultados_cache = self._buscar_en_cache(texto_producto, dimensiones, color)
+            if resultados_cache:
+                productos_encontrados = resultados_cache[:limite]
+                return productos_encontrados
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PASO 2: Si no hay caché, buscar en BD
+        # ═══════════════════════════════════════════════════════════════
+        
+        try:
+            if hasattr(self.app, '_ejecutar_sql'):
+                condiciones = []
+                
+                # Buscar por dimensiones
+                if dimensiones:
+                    # Buscar tanto "8x12" como "8X12" como "8 x 12"
+                    d1, d2 = dimensiones.split('x')
+                    condiciones.append(f"(UPPER(DESCRIPCION) LIKE '%{d1}X{d2}%' OR "
+                                      f"UPPER(DESCRIPCION) LIKE '%{d1} X {d2}%' OR "
+                                      f"UPPER(CODIGO) LIKE '%{d1}{d2}%')")
+                
+                # Buscar por tamaño T
+                if tamano_t:
+                    condiciones.append(f"(UPPER(DESCRIPCION) LIKE '%T{tamano_t}%' OR "
+                                      f"UPPER(DESCRIPCION) LIKE '%T {tamano_t}%' OR "
+                                      f"UPPER(DESCRIPCION) LIKE '%T-{tamano_t}%')")
+                
+                # Buscar por color
+                if color:
+                    condiciones.append(f"UPPER(DESCRIPCION) LIKE UPPER('%{color}%')")
+                
+                # Si no hay condiciones específicas, buscar por texto general
+                if not condiciones:
+                    palabras = re.findall(r'[a-zA-ZáéíóúñÁÉÍÓÚÑ]{3,}', texto_producto.lower())
+                    for palabra in palabras[:3]:
+                        condiciones.append(f"UPPER(DESCRIPCION) LIKE UPPER('%{palabra}%')")
+                
+                if condiciones:
+                    where = ' AND '.join(condiciones)
+                    sql = f"""
+                        SELECT FIRST {limite} CODIGO, DESCRIPCION, 
+                               COALESCE(INVENTARIO, 0) as INV, COALESCE(PRECIO1, 0) as PRECIO
+                        FROM PRODUCTOS 
+                        WHERE {where}
+                        ORDER BY INVENTARIO DESC;
+                    """
+                    ok, stdout, stderr = self.app._ejecutar_sql(sql)
+                    if ok and stdout:
+                        for linea in stdout.split('\n'):
+                            linea = linea.strip()
+                            if linea and not linea.startswith('=') and 'CODIGO' not in linea:
+                                partes = linea.split()
+                                if len(partes) >= 4:
+                                    cod = partes[0]
+                                    precio = float(partes[-1]) if partes[-1].replace('.','').isdigit() else 0
+                                    inv = int(partes[-2]) if partes[-2].isdigit() else 0
+                                    desc = ' '.join(partes[1:-2])
+                                    productos_encontrados.append((cod, desc, inv, precio))
+                
+                # Si aún no hay resultados, buscar solo por dimensiones sin color
+                if not productos_encontrados and dimensiones:
+                    d1, d2 = dimensiones.split('x')
+                    sql = f"""
+                        SELECT FIRST {limite} CODIGO, DESCRIPCION, 
+                               COALESCE(INVENTARIO, 0) as INV, COALESCE(PRECIO1, 0) as PRECIO
+                        FROM PRODUCTOS 
+                        WHERE UPPER(DESCRIPCION) LIKE '%{d1}X{d2}%' 
+                           OR UPPER(DESCRIPCION) LIKE '%{d1} X {d2}%'
+                           OR UPPER(CODIGO) LIKE '%{d1}{d2}%'
+                        ORDER BY INVENTARIO DESC;
+                    """
+                    ok, stdout, stderr = self.app._ejecutar_sql(sql)
+                    if ok and stdout:
+                        for linea in stdout.split('\n'):
+                            linea = linea.strip()
+                            if linea and not linea.startswith('=') and 'CODIGO' not in linea:
+                                partes = linea.split()
+                                if len(partes) >= 4:
+                                    cod = partes[0]
+                                    precio = float(partes[-1]) if partes[-1].replace('.','').isdigit() else 0
+                                    inv = int(partes[-2]) if partes[-2].isdigit() else 0
+                                    desc = ' '.join(partes[1:-2])
+                                    if (cod, desc, inv, precio) not in productos_encontrados:
+                                        productos_encontrados.append((cod, desc, inv, precio))
+                
+                # Búsqueda general si no hay resultados
+                if not productos_encontrados:
+                    productos_encontrados = self._buscar_productos_similares(texto_producto, limite)
+                    
+        except Exception as e:
+            print(f"Error buscando producto: {e}")
+        
+        return productos_encontrados[:limite]
     
     # ══════════════════════════════════════════════════════════════════
     # BOT DE TELEGRAM
@@ -667,6 +1170,9 @@ class TabOrdenes:
             self.bot_app.add_handler(InlineQueryHandler(self._inline_query_handler))
             self.bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._msg_pedido))
             
+            # Manejador de errores para evitar tracebacks largos
+            self.bot_app.add_error_handler(self._error_handler)
+            
             self.parent.after(0, lambda: self.status_var.set("🟢 Bot activo"))
             
             self.loop.run_until_complete(self.bot_app.initialize())
@@ -677,6 +1183,28 @@ class TabOrdenes:
         except Exception as e:
             error_msg = str(e)
             self.parent.after(0, lambda: self._on_bot_error(error_msg))
+    
+    async def _error_handler(self, update, context):
+        """Manejador global de errores del bot - evita tracebacks largos."""
+        from telegram.error import TimedOut, NetworkError, BadRequest
+        
+        error = context.error
+        
+        # Errores de red (timeout, sin conexión) - solo log simple
+        if isinstance(error, (TimedOut, NetworkError)):
+            print(f"[BOT] ⚠️ Error de red: {type(error).__name__}")
+            return
+        
+        # Errores de Telegram (query expirado, mensaje muy viejo)
+        if isinstance(error, BadRequest):
+            error_msg = str(error).lower()
+            if "query is too old" in error_msg or "message is not modified" in error_msg:
+                return  # Ignorar silenciosamente
+            print(f"[BOT] ⚠️ BadRequest: {error}")
+            return
+        
+        # Otros errores - log con más detalle
+        print(f"[BOT] ❌ Error: {type(error).__name__}: {error}")
     
     def _on_bot_error(self, error: str):
         """Maneja errores del bot."""
@@ -716,117 +1244,464 @@ class TabOrdenes:
     # ══════════════════════════════════════════════════════════════════
     
     async def _cmd_start(self, update, context):
-        """Comando /start - Saludo inicial."""
-        productos_populares = self._obtener_productos_populares(5)
-        productos_text = ""
-        if productos_populares:
-            productos_text = "\n\n📦 *Productos disponibles:*\n"
-            for cod, desc, stock, precio in productos_populares:
-                productos_text += f"• {desc[:30]} (Stock: {stock})\n"
+        """Comando /start - Saludo inicial mejorado."""
+        user = update.message.from_user
+        nombre = user.first_name or "Usuario"
+        
+        # Mensaje de bienvenida personalizado
+        bienvenida = f"👋 *¡Hola {nombre}!*\n\n"
+        bienvenida += "Soy tu asistente de pedidos. Puedo ayudarte a:\n\n"
+        bienvenida += "📦 Registrar pedidos de clientes\n"
+        bienvenida += "🔍 Buscar productos y precios\n"
+        bienvenida += "👥 Encontrar clientes en el sistema\n\n"
+        
+        bienvenida += "━━━━━━━━━━━━━━━━━━━━━\n"
+        bienvenida += "📝 *¿Cómo hacer un pedido?*\n"
+        bienvenida += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        bienvenida += "Simplemente escribe el nombre del cliente\n"
+        bienvenida += "seguido de los productos:\n\n"
+        bienvenida += "```\nLas Granjas\n10 812 negra\n5 t25 blanca\n```\n\n"
+        
+        # Botones de inicio rápido
+        keyboard = [
+            [InlineKeyboardButton("🔍 Buscar Cliente", callback_data="inicio_buscar_cliente"),
+             InlineKeyboardButton("📦 Ver Productos", callback_data="inicio_ver_productos")],
+            [InlineKeyboardButton("❓ Ayuda", callback_data="inicio_ayuda")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🛒 *¡Bienvenido al Bot de Órdenes PlastiBot!*\n\n"
-            "📝 *Para hacer un pedido:*\n"
-            "Envía: `Cliente - productos`\n"
-            "Ejemplo: `Juan Pérez - 10 bolsas, 5 rollos`\n\n"
-            "🔍 *Comandos rápidos:*\n"
-            "• /b [texto] - Buscar producto o cliente\n"
-            "• /s [producto] - Ver stock\n"
-            "• /c [nombre] - Buscar cliente\n"
-            "• /productos - Ver catálogo\n"
-            "• /ayuda - Ver todos los comandos"
-            f"{productos_text}",
-            parse_mode="Markdown"
+            bienvenida,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
         )
     
     async def _cmd_ayuda(self, update, context):
-        """Comando /ayuda - Lista de comandos."""
+        """Comando /ayuda - Lista de comandos mejorada."""
+        ayuda = "📚 *GUÍA RÁPIDA*\n"
+        ayuda += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        ayuda += "🛒 *HACER UN PEDIDO:*\n"
+        ayuda += "Escribe directamente:\n"
+        ayuda += "```\nNombre Cliente\n10 812 negra\n5 t25 blanca\n```\n\n"
+        
+        ayuda += "🔤 *FORMATOS DE PRODUCTOS:*\n"
+        ayuda += "• `812` o `8x12` → Bolsa 8x12\n"
+        ayuda += "• `t25` o `t 25` → Bolsa T25\n"
+        ayuda += "• `negra`, `blanca`, `opaca`\n\n"
+        
+        ayuda += "⌨️ *COMANDOS:*\n"
+        ayuda += "• `/b texto` - Buscar todo\n"
+        ayuda += "• `/c nombre` - Buscar cliente\n"
+        ayuda += "• `/s producto` - Ver stock\n\n"
+        
+        ayuda += "💡 *TIPS:*\n"
+        ayuda += "• Toca los botones para seleccionar\n"
+        ayuda += "• No necesitas escribir todo exacto\n"
+        ayuda += "• El bot te sugiere opciones"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔍 Probar Búsqueda", callback_data="inicio_buscar_cliente")],
+            [InlineKeyboardButton("📦 Ver Productos", callback_data="inicio_ver_productos")]
+        ]
+        
         await update.message.reply_text(
-            "📖 *Comandos disponibles:*\n\n"
-            "*PEDIDOS:*\n"
-            "• `/pedido` o `/p` - Crear pedido\n"
-            "  Formato: `Cliente - producto1 x5, producto2 x3`\n\n"
-            "*BÚSQUEDAS:*\n"
-            "• `/buscar` o `/b` [texto] - Busca clientes Y productos\n"
-            "• `/stock` o `/s` [producto] - Ver inventario\n"
-            "• `/cliente` o `/c` [nombre] - Buscar cliente\n"
-            "• `/productos` - Lista de productos\n\n"
-            "💡 Envía cualquier mensaje para registrarlo como pedido.",
-            parse_mode="Markdown"
+            ayuda,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
     async def _cmd_pedido(self, update, context):
         """Comando /pedido - Crea una orden."""
         texto = ' '.join(context.args) if context.args else ''
-        await self._crear_orden(update, texto)
+        await self._procesar_mensaje_pedido(update, texto)
     
     async def _msg_pedido(self, update, context):
         """Maneja mensajes normales como pedidos."""
         texto = update.message.text
-        await self._crear_orden(update, texto)
+        user_id = update.message.from_user.id
+        
+        # Verificar si el usuario tiene una sesión activa esperando algo
+        if user_id in self.user_sessions:
+            session = self.user_sessions[user_id]
+            
+            # Esperando productos adicionales
+            if session.get('esperando_productos'):
+                await self._agregar_productos_sesion(update, texto)
+                return
+            
+            # Esperando búsqueda de cliente
+            if session.get('esperando_cliente'):
+                session['esperando_cliente'] = False
+                clientes = self._buscar_clientes_similares(texto, 8)
+                if clientes:
+                    keyboard = []
+                    for cli in clientes:
+                        keyboard.append([InlineKeyboardButton(f"👤 {cli[:40]}", callback_data=f"confirmar_cli:{cli[:50]}")])
+                    keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")])
+                    
+                    await update.message.reply_text(
+                        f"🔍 *Resultados para '{texto}':*\n\n"
+                        f"Encontré {len(clientes)} cliente(s).\n"
+                        f"_Toca para seleccionar:_",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"😕 No encontré clientes con '{texto}'\n\n"
+                        f"Intenta con otro nombre o usa el nombre tal cual.",
+                        parse_mode="Markdown"
+                    )
+                return
+            
+            # Esperando búsqueda de producto
+            if session.get('esperando_busqueda_prod') is not None:
+                idx = session['esperando_busqueda_prod']
+                session['esperando_busqueda_prod'] = None
+                productos = self._buscar_producto_en_bd(texto, 8)
+                if productos:
+                    keyboard = []
+                    for cod, desc, stock, precio in productos:
+                        emoji = "✅" if stock > 0 else "❌"
+                        callback_data = f"confirmar_prod:{idx}:{cod}:{desc[:35]}"
+                        keyboard.append([InlineKeyboardButton(f"{emoji} {desc[:30]}", callback_data=callback_data)])
+                    keyboard.append([InlineKeyboardButton("⬅️ Volver", callback_data=f"volver_prod:{idx}")])
+                    
+                    await update.message.reply_text(
+                        f"🔍 *Resultados para '{texto}':*\n\n"
+                        f"_Toca el producto correcto:_",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"😕 No encontré '{texto}'\n\nIntenta con otro término.",
+                        parse_mode="Markdown"
+                    )
+                return
+        
+        await self._procesar_mensaje_pedido(update, texto)
     
-    async def _crear_orden(self, update, texto: str):
-        """Crea una orden de venta con parseo inteligente."""
+    async def _procesar_mensaje_pedido(self, update, texto: str):
+        """
+        Procesa un mensaje de pedido con confirmación interactiva mejorada.
+        Flujo: Mensaje -> Confirmar Cliente -> Confirmar Productos -> Crear Orden
+        """
         if not texto.strip():
+            keyboard = [
+                [InlineKeyboardButton("🔍 Buscar Cliente", callback_data="inicio_buscar_cliente")],
+                [InlineKeyboardButton("❓ Ver Ayuda", callback_data="inicio_ayuda")]
+            ]
             await update.message.reply_text(
-                "⚠️ Por favor incluye el pedido.\n\n"
-                "*Formatos aceptados:*\n"
-                "• `Juan - 10 bolsas, 5 rollos`\n"
-                "• `Juan Pérez: producto x5`\n\n"
-                "Usa /buscar para encontrar clientes o productos",
-                parse_mode="Markdown"
+                "📝 *¿Cómo hacer un pedido?*\n\n"
+                "Escribe el cliente y productos así:\n\n"
+                "```\nJuan Pérez\n10 812 negra\n5 t25 blanca\n```\n\n"
+                "O busca un cliente primero 👇",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
         user = update.message.from_user
-        fecha = datetime.now().strftime('%Y-%m-%d')
+        user_id = user.id
         
+        # Indicador de procesamiento
+        processing_msg = await update.message.reply_text("⏳ _Analizando pedido..._", parse_mode="Markdown")
+        
+        # Parsear el mensaje
         parsed = self._parsear_pedido(texto)
-        cliente = parsed['cliente']
-        productos_texto = parsed['productos_texto']
-        productos_lista = parsed['productos']
+        cliente_texto = parsed['cliente']
+        productos_parseados = parsed['productos']
         
-        resumen_productos = []
-        for prod in productos_lista:
-            if prod['cantidad'] > 1:
-                resumen_productos.append(f"{prod['cantidad']}x {prod['nombre']}")
-            else:
-                resumen_productos.append(prod['nombre'])
+        # Eliminar mensaje de procesamiento
+        try:
+            await processing_msg.delete()
+        except:
+            pass
         
-        productos_str = ', '.join(resumen_productos) if resumen_productos else productos_texto
+        # Buscar clientes similares
+        clientes_encontrados = []
+        if cliente_texto:
+            clientes_encontrados = self._buscar_clientes_similares(cliente_texto, 5)
         
-        if HAS_DB:
-            orden_id = db_local.crear_orden_telegram(
-                fecha=fecha,
-                telegram_user_id=user.id,
-                telegram_username=user.username or '',
-                telegram_nombre=user.full_name or user.first_name,
-                mensaje_original=texto,
-                cliente=cliente,
-                productos=productos_str
+        # Crear sesión temporal para este pedido
+        self.user_sessions[user_id] = {
+            'mensaje_original': texto,
+            'cliente_texto': cliente_texto,
+            'cliente_confirmado': None,
+            'productos_parseados': productos_parseados,
+            'productos_confirmados': [],
+            'producto_actual_idx': 0,
+            'timestamp': datetime.now(),
+            'esperando_productos': False,
+            'esperando_cliente': False,
+            'esperando_busqueda_prod': None
+        }
+        
+        # Crear resumen del pedido detectado
+        resumen_productos = ""
+        if productos_parseados:
+            resumen_productos = "\n📦 *Productos detectados:*\n"
+            for i, p in enumerate(productos_parseados, 1):
+                dims = p.get('dimensiones', '')
+                tam = p.get('tamano_t', '')
+                color = p.get('color', '')
+                info = dims or (f"T{tam}" if tam else '') or ''
+                if info and color:
+                    info = f"{info} {color}"
+                elif color:
+                    info = color
+                resumen_productos += f"  {i}. {p['cantidad']}x {info or p['nombre'][:20]}\n"
+        
+        # PASO 1: Confirmar cliente
+        if clientes_encontrados:
+            keyboard = []
+            
+            # Mostrar el más probable primero con emoji especial
+            keyboard.append([InlineKeyboardButton(
+                f"✅ {clientes_encontrados[0][:38]}", 
+                callback_data=f"confirmar_cli:{clientes_encontrados[0][:50]}"
+            )])
+            
+            # Resto de clientes
+            for cli in clientes_encontrados[1:]:
+                keyboard.append([InlineKeyboardButton(
+                    f"👤 {cli[:40]}", 
+                    callback_data=f"confirmar_cli:{cli[:50]}"
+                )])
+            
+            keyboard.append([
+                InlineKeyboardButton("✏️ Usar original", callback_data=f"usar_cliente:{cliente_texto[:50]}"),
+                InlineKeyboardButton("🔍 Otro", callback_data="buscar_cliente")
+            ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            mensaje = f"━━━━━━━━━━━━━━━━━━━━━\n"
+            mensaje += f"📋 *NUEVO PEDIDO*\n"
+            mensaje += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            mensaje += f"👤 *Cliente:* `{cliente_texto}`\n"
+            mensaje += resumen_productos
+            mensaje += f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+            mensaje += f"*¿Es este cliente?*\n"
+            mensaje += f"_Toca la opción correcta:_"
+            
+            await update.message.reply_text(mensaje, parse_mode="Markdown", reply_markup=reply_markup)
+            
+        elif cliente_texto:
+            # No se encontraron clientes similares
+            keyboard = [
+                [InlineKeyboardButton("✅ Sí, usar este nombre", callback_data=f"usar_cliente:{cliente_texto[:50]}")],
+                [InlineKeyboardButton("🔍 Buscar otro cliente", callback_data="buscar_cliente")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            mensaje = f"━━━━━━━━━━━━━━━━━━━━━\n"
+            mensaje += f"📋 *NUEVO PEDIDO*\n"
+            mensaje += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            mensaje += f"👤 *Cliente:* `{cliente_texto}`\n"
+            mensaje += resumen_productos
+            mensaje += f"\n⚠️ _No encontré este cliente en el sistema_\n"
+            mensaje += f"_¿Continuar con este nombre?_"
+            
+            await update.message.reply_text(mensaje, parse_mode="Markdown", reply_markup=reply_markup)
+        else:
+            # No se detectó cliente - mostrar productos y pedir cliente
+            keyboard = [
+                [InlineKeyboardButton("🔍 Buscar cliente", callback_data="buscar_cliente")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            mensaje = f"━━━━━━━━━━━━━━━━━━━━━\n"
+            mensaje += f"📋 *NUEVO PEDIDO*\n"
+            mensaje += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            mensaje += f"⚠️ *No detecté el cliente*\n"
+            mensaje += resumen_productos
+            mensaje += f"\n_Busca el cliente para continuar:_"
+            
+            await update.message.reply_text(mensaje, parse_mode="Markdown", reply_markup=reply_markup)
+    
+    async def _confirmar_productos(self, update, user_id: int, editar_mensaje: bool = True):
+        """Muestra productos para confirmar con interfaz mejorada."""
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        productos = session['productos_parseados']
+        idx = session['producto_actual_idx']
+        total_productos = len(productos)
+        confirmados = len(session['productos_confirmados'])
+        
+        if idx >= total_productos:
+            # Todos los productos confirmados, mostrar resumen final
+            await self._mostrar_resumen_final(update, user_id, editar_mensaje)
+            return
+        
+        producto = productos[idx]
+        cantidad = producto['cantidad']
+        nombre = producto['nombre']
+        original = producto.get('original', nombre)
+        nota = producto.get('nota', '')
+        unidad = producto.get('unidad', 'paq')
+        dimensiones = producto.get('dimensiones')
+        tamano_t = producto.get('tamano_t')
+        color = producto.get('color')
+        
+        # Buscar coincidencias en BD pasando el producto parseado
+        coincidencias = self._buscar_producto_en_bd(nombre, 6, producto_parseado=producto)
+        
+        keyboard = []
+        
+        # Barra de progreso visual
+        progress = "".join(["●" if i < confirmados else "○" for i in range(total_productos)])
+        
+        texto_producto = f"━━━━━━━━━━━━━━━━━━━━━\n"
+        texto_producto += f"📦 *PRODUCTO {idx + 1} DE {total_productos}*\n"
+        texto_producto += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        texto_producto += f"Progreso: {progress}\n\n"
+        
+        texto_producto += f"📝 `{original}`\n\n"
+        texto_producto += f"🔢 *Cantidad:* {cantidad} {unidad}\n"
+        
+        # Mostrar interpretación de forma compacta
+        interpretacion = []
+        if dimensiones:
+            interpretacion.append(f"📐 {dimensiones}")
+        if tamano_t:
+            interpretacion.append(f"T{tamano_t}")
+        if color:
+            interpretacion.append(f"🎨 {color}")
+        
+        if interpretacion:
+            texto_producto += f"🔍 *Detectado:* {' • '.join(interpretacion)}\n"
+        
+        texto_producto += f"\n_Selecciona el producto correcto:_\n"
+        
+        if coincidencias:
+            # Primer resultado con emoji especial (más probable)
+            cod, desc, stock, precio = coincidencias[0]
+            emoji = "✅" if stock > 0 else "⚠️"
+            btn_text = f"{emoji} {desc[:32]}"
+            callback_data = f"confirmar_prod:{idx}:{cod}:{desc[:35]}"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+            
+            # Resto de resultados
+            for cod, desc, stock, precio in coincidencias[1:]:
+                emoji = "📦" if stock > 0 else "❌"
+                btn_text = f"{emoji} {desc[:32]}"
+                callback_data = f"confirmar_prod:{idx}:{cod}:{desc[:35]}"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+        else:
+            texto_producto += "\n⚠️ _No encontré coincidencias_\n"
+        
+        # Opciones adicionales en una fila compacta
+        keyboard.append([
+            InlineKeyboardButton("🔍 Buscar", callback_data=f"buscar_prod:{idx}"),
+            InlineKeyboardButton("🔢 Cantidad", callback_data=f"cambiar_cant:{idx}")
+        ])
+        keyboard.append([
+            InlineKeyboardButton("⏭️ Omitir", callback_data=f"omitir_prod:{idx}"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if editar_mensaje:
+            try:
+                await update.callback_query.message.edit_text(
+                    texto_producto,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+            except:
+                await update.callback_query.message.reply_text(
+                    texto_producto,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+        else:
+            await update.message.reply_text(
+                texto_producto,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+    
+    async def _mostrar_resumen_final(self, update, user_id: int, editar_mensaje: bool = True):
+        """Muestra resumen final del pedido con interfaz mejorada."""
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        cliente = session.get('cliente_confirmado', session.get('cliente_texto', 'Sin cliente'))
+        productos = session.get('productos_confirmados', [])
+        
+        texto = f"━━━━━━━━━━━━━━━━━━━━━\n"
+        texto += f"✅ *PEDIDO LISTO*\n"
+        texto += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        texto += f"👤 *Cliente:*\n{cliente}\n\n"
+        texto += f"📦 *Productos ({len(productos)}):*\n"
+        
+        if productos:
+            total_items = 0
+            for p in productos:
+                total_items += p['cantidad']
+                texto += f"  ✓ {p['cantidad']}x {p['descripcion'][:30]}\n"
+            texto += f"\n📊 *Total items:* {total_items}\n"
+        else:
+            texto += "  ⚠️ _Sin productos confirmados_\n"
+        
+        texto += f"\n━━━━━━━━━━━━━━━━━━━━━"
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ CREAR PEDIDO", callback_data="crear_pedido_final")],
+            [InlineKeyboardButton("➕ Agregar productos", callback_data="agregar_mas_productos"),
+             InlineKeyboardButton("✏️ Editar", callback_data="reiniciar_pedido")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if editar_mensaje:
+            try:
+                await update.callback_query.message.edit_text(
+                    texto,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+            except:
+                await update.callback_query.message.reply_text(
+                    texto,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+        else:
+            await update.message.reply_text(
+                texto,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+    
+    async def _agregar_productos_sesion(self, update, texto: str):
+        """Agrega productos adicionales a la sesión actual."""
+        user_id = update.message.from_user.id
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        nuevos_productos = self._parsear_lineas_productos(texto)
+        
+        if nuevos_productos:
+            session['productos_parseados'].extend(nuevos_productos)
+            session['esperando_productos'] = False
+            
+            await update.message.reply_text(
+                f"✅ {len(nuevos_productos)} producto(s) agregado(s).\n"
+                f"Continuando con la confirmación..."
             )
             
-            if orden_id > 0:
-                respuesta = f"✅ *Orden #{orden_id} registrada*\n\n"
-                respuesta += f"👤 *Cliente:* {cliente or 'No especificado'}\n"
-                
-                if productos_lista:
-                    respuesta += f"📦 *Productos:*\n"
-                    for prod in productos_lista:
-                        qty = f" x{prod['cantidad']}" if prod['cantidad'] > 1 else ""
-                        respuesta += f"  • {prod['nombre']}{qty}\n"
-                else:
-                    respuesta += f"📦 *Productos:* {productos_texto}\n"
-                
-                if parsed.get('cliente_sugerido') and parsed['cliente_sugerido'].upper() != cliente.upper():
-                    respuesta += f"\n💡 ¿Quisiste decir cliente: *{parsed['cliente_sugerido']}*?"
-                
-                respuesta += "\n_La orden será procesada pronto._"
-                
-                await update.message.reply_text(respuesta, parse_mode="Markdown")
-                self.parent.after(0, self._cargar_ordenes)
-            else:
-                await update.message.reply_text("❌ Error al guardar la orden")
+            # Continuar confirmación desde donde quedó
+            await self._confirmar_productos(update, user_id, editar_mensaje=False)
     
     async def _cmd_buscar(self, update, context):
         """Comando /buscar - Búsqueda combinada."""
@@ -841,30 +1716,430 @@ class TabOrdenes:
         
         termino = ' '.join(context.args)
         respuesta = f"🔍 *Resultados para '{termino}':*\n\n"
+        keyboard = []
         
         clientes = self._buscar_clientes_similares(termino, 5)
         if clientes:
-            respuesta += "👥 *Clientes:*\n"
+            respuesta += "👥 *Clientes (toca para seleccionar):*\n"
             for i, cli in enumerate(clientes, 1):
                 respuesta += f"  {i}. {cli}\n"
+                # Agregar botón para cada cliente
+                keyboard.append([InlineKeyboardButton(f"👤 {cli[:30]}", callback_data=f"cli:{cli[:60]}")])
             respuesta += "\n"
         
         productos = self._buscar_productos_similares(termino, 8)
         if productos:
-            respuesta += "📦 *Productos:*\n"
+            respuesta += "📦 *Productos (toca para agregar):*\n"
             for cod, desc, stock, precio in productos:
                 emoji = "✅" if stock > 0 else "❌"
                 respuesta += f"  {emoji} {desc[:30]}\n     Stock: {stock} | ${precio:.2f}\n"
+                # Agregar botón para cada producto
+                keyboard.append([InlineKeyboardButton(f"📦 {desc[:25]} (${precio:.0f})", callback_data=f"prod:{desc[:50]}")])
         
         if not clientes and not productos:
             respuesta = f"❌ No se encontraron resultados para '{termino}'"
-        
-        await update.message.reply_text(respuesta, parse_mode="Markdown")
+            await update.message.reply_text(respuesta, parse_mode="Markdown")
+        else:
+            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+            await update.message.reply_text(respuesta, parse_mode="Markdown", reply_markup=reply_markup)
     
     async def _callback_handler(self, update, context):
-        """Maneja callbacks de botones inline."""
+        """Maneja callbacks de botones inline con flujo de confirmación."""
         query = update.callback_query
-        await query.answer()
+        data = query.data
+        user_id = query.from_user.id
+        
+        # Helper para responder de forma segura (ignora timeouts de Telegram)
+        async def safe_answer(text=None, show_alert=False):
+            try:
+                await query.answer(text, show_alert=show_alert)
+            except Exception:
+                pass  # Ignorar errores de query expirado
+        
+        # ═══════════════════════════════════════════════════════════════
+        # BOTONES DE INICIO RÁPIDO
+        # ═══════════════════════════════════════════════════════════════
+        
+        if data == "inicio_buscar_cliente":
+            await safe_answer()
+            await query.message.edit_text(
+                "🔍 *Buscar Cliente*\n\n"
+                "Escribe el nombre del cliente que buscas:\n\n"
+                "_Ejemplo: escribe 'granjas' para buscar_",
+                parse_mode="Markdown"
+            )
+            # Crear sesión para esperar búsqueda
+            self.user_sessions[user_id] = {
+                'esperando_cliente': True,
+                'productos_parseados': [],
+                'productos_confirmados': [],
+                'producto_actual_idx': 0,
+                'timestamp': datetime.now()
+            }
+            return
+        
+        elif data == "inicio_ver_productos":
+            await safe_answer()
+            productos = self._obtener_productos_populares(15)
+            
+            if productos:
+                texto = "📦 *PRODUCTOS DISPONIBLES*\n"
+                texto += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                
+                keyboard = []
+                for cod, desc, stock, precio in productos:
+                    if stock > 0:
+                        keyboard.append([InlineKeyboardButton(
+                            f"✅ {desc[:28]} (${precio:.0f})",
+                            callback_data=f"info_prod:{cod}"
+                        )])
+                
+                keyboard.append([InlineKeyboardButton("🔍 Buscar otro", callback_data="inicio_buscar_producto")])
+                keyboard.append([InlineKeyboardButton("⬅️ Volver", callback_data="inicio_volver")])
+                
+                await query.message.edit_text(
+                    texto + "_Toca un producto para ver detalles:_",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.message.edit_text("❌ No hay productos disponibles")
+            return
+        
+        elif data == "inicio_buscar_producto":
+            await safe_answer()
+            await query.message.edit_text(
+                "🔍 *Buscar Producto*\n\n"
+                "Escribe el código o nombre:\n"
+                "_Ejemplo: '812 negra' o 't25'_",
+                parse_mode="Markdown"
+            )
+            self.user_sessions[user_id] = {
+                'esperando_busqueda_prod': -1,  # -1 indica búsqueda general
+                'productos_parseados': [],
+                'productos_confirmados': [],
+                'producto_actual_idx': 0,
+                'timestamp': datetime.now()
+            }
+            return
+        
+        elif data.startswith("info_prod:"):
+            codigo = data[10:]
+            await safe_answer()
+            productos = self._buscar_productos_similares(codigo, 1)
+            if productos:
+                cod, desc, stock, precio = productos[0]
+                texto = f"📦 *{desc}*\n\n"
+                texto += f"📋 Código: `{cod}`\n"
+                texto += f"📊 Stock: {stock} unidades\n"
+                texto += f"💰 Precio: ${precio:.2f}\n"
+                
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Ver más productos", callback_data="inicio_ver_productos")]
+                ]
+                await query.message.edit_text(
+                    texto,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            return
+        
+        elif data == "inicio_ayuda":
+            await safe_answer()
+            await self._cmd_ayuda(update.callback_query, context)
+            return
+        
+        elif data == "inicio_volver":
+            await safe_answer()
+            # Volver a mensaje de inicio
+            keyboard = [
+                [InlineKeyboardButton("🔍 Buscar Cliente", callback_data="inicio_buscar_cliente"),
+                 InlineKeyboardButton("📦 Ver Productos", callback_data="inicio_ver_productos")],
+                [InlineKeyboardButton("❓ Ayuda", callback_data="inicio_ayuda")]
+            ]
+            await query.message.edit_text(
+                "📝 *¿Qué deseas hacer?*\n\n"
+                "Selecciona una opción o envía un pedido directamente.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FLUJO DE CONFIRMACIÓN DE PEDIDO NUEVO
+        # ═══════════════════════════════════════════════════════════════
+        
+        if data.startswith("confirmar_cli:"):
+            # Confirmar cliente de la BD
+            cliente = data[14:]
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['cliente_confirmado'] = cliente
+            await safe_answer(f"✅ {cliente[:20]}")
+            # Proceder a confirmar productos
+            await self._confirmar_productos(update, user_id)
+        
+        elif data.startswith("usar_cliente:"):
+            # Usar cliente tal como se escribió
+            cliente = data[13:]
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['cliente_confirmado'] = cliente
+            await safe_answer(f"✅ {cliente}")
+            await self._confirmar_productos(update, user_id)
+        
+        elif data == "buscar_cliente":
+            # Pedir que busque cliente
+            await safe_answer()
+            await query.message.edit_text(
+                "🔍 *Buscar cliente*\n\n"
+                "Escribe el nombre del cliente para buscarlo:",
+                parse_mode="Markdown"
+            )
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['esperando_cliente'] = True
+        
+        elif data.startswith("confirmar_prod:"):
+            # Confirmar producto de la BD
+            # Formato: confirmar_prod:idx:codigo:descripcion
+            partes = data.split(":", 3)
+            if len(partes) >= 4:
+                idx = int(partes[1])
+                codigo = partes[2]
+                descripcion = partes[3]
+                
+                if user_id in self.user_sessions:
+                    session = self.user_sessions[user_id]
+                    if idx < len(session['productos_parseados']):
+                        cantidad = session['productos_parseados'][idx]['cantidad']
+                        unidad = session['productos_parseados'][idx].get('unidad', 'pza')
+                        
+                        session['productos_confirmados'].append({
+                            'codigo': codigo,
+                            'descripcion': descripcion,
+                            'cantidad': cantidad,
+                            'unidad': unidad
+                        })
+                        session['producto_actual_idx'] = idx + 1
+                        
+                await safe_answer(f"✅ {descripcion[:20]}")
+                await self._confirmar_productos(update, user_id)
+        
+        elif data.startswith("buscar_prod:"):
+            # Buscar otro producto
+            idx = int(data.split(":")[1])
+            await safe_answer()
+            await query.message.edit_text(
+                f"🔍 *Buscar producto {idx + 1}*\n\n"
+                "Escribe el código o nombre del producto:",
+                parse_mode="Markdown"
+            )
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['esperando_busqueda_prod'] = idx
+        
+        elif data.startswith("omitir_prod:"):
+            # Omitir producto
+            idx = int(data.split(":")[1])
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['producto_actual_idx'] = idx + 1
+            await safe_answer("⏭️ Omitido")
+            await self._confirmar_productos(update, user_id)
+        
+        elif data.startswith("cambiar_cant:"):
+            # Cambiar cantidad
+            idx = int(data.split(":")[1])
+            await safe_answer()
+            if user_id in self.user_sessions:
+                session = self.user_sessions[user_id]
+                producto = session['productos_parseados'][idx]
+                keyboard = [
+                    [InlineKeyboardButton("1", callback_data=f"setcant:{idx}:1"),
+                     InlineKeyboardButton("5", callback_data=f"setcant:{idx}:5"),
+                     InlineKeyboardButton("10", callback_data=f"setcant:{idx}:10")],
+                    [InlineKeyboardButton("20", callback_data=f"setcant:{idx}:20"),
+                     InlineKeyboardButton("50", callback_data=f"setcant:{idx}:50"),
+                     InlineKeyboardButton("100", callback_data=f"setcant:{idx}:100")],
+                    [InlineKeyboardButton("⬅️ Volver", callback_data=f"volver_prod:{idx}")]
+                ]
+                await query.message.edit_text(
+                    f"🔢 *Cambiar cantidad para:*\n`{producto['nombre']}`\n\n"
+                    f"Cantidad actual: {producto['cantidad']}\n"
+                    "Selecciona nueva cantidad:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        
+        elif data.startswith("setcant:"):
+            # Establecer cantidad
+            partes = data.split(":")
+            idx = int(partes[1])
+            cantidad = int(partes[2])
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['productos_parseados'][idx]['cantidad'] = cantidad
+            await safe_answer(f"✅ Cantidad: {cantidad}")
+            await self._confirmar_productos(update, user_id)
+        
+        elif data.startswith("volver_prod:"):
+            idx = int(data.split(":")[1])
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['producto_actual_idx'] = idx
+            await safe_answer()
+            await self._confirmar_productos(update, user_id)
+        
+        elif data == "crear_pedido_final":
+            # Crear pedido final
+            if user_id not in self.user_sessions:
+                await safe_answer("⚠️ Sin sesión activa")
+                return
+            
+            session = self.user_sessions[user_id]
+            cliente = session.get('cliente_confirmado', session.get('cliente_texto', ''))
+            productos = session.get('productos_confirmados', [])
+            
+            if not productos:
+                await safe_answer("⚠️ Sin productos confirmados")
+                return
+            
+            await safe_answer("✅ Creando pedido...")
+            
+            # Formatear productos
+            productos_str = ", ".join([f"{p['cantidad']}x {p['descripcion']}" for p in productos])
+            
+            # Guardar en base de datos
+            if HAS_DB:
+                from datetime import date
+                orden_id = db_local.crear_orden_telegram(
+                    fecha=date.today().isoformat(),
+                    telegram_user_id=user_id,
+                    telegram_username=query.from_user.username or '',
+                    telegram_nombre=query.from_user.full_name or query.from_user.first_name,
+                    mensaje_original=session.get('mensaje_original', ''),
+                    cliente=cliente,
+                    productos=productos_str
+                )
+                
+                if orden_id > 0:
+                    respuesta = f"✅ *Pedido #{orden_id} Creado*\n\n"
+                    respuesta += f"👤 *Cliente:* {cliente}\n\n"
+                    respuesta += f"📦 *Productos:*\n"
+                    for p in productos:
+                        respuesta += f"  • {p['cantidad']}x {p['descripcion']}\n"
+                        if p.get('codigo'):
+                            respuesta += f"    _{p['codigo']}_\n"
+                    respuesta += "\n✅ _Pedido registrado correctamente_"
+                    
+                    await query.message.edit_text(respuesta, parse_mode="Markdown")
+                    self.parent.after(0, self._cargar_ordenes)
+                else:
+                    await query.message.edit_text("❌ Error al guardar el pedido")
+            
+            # Limpiar sesión
+            del self.user_sessions[user_id]
+        
+        elif data == "agregar_mas_productos":
+            # Esperar más productos
+            if user_id in self.user_sessions:
+                self.user_sessions[user_id]['esperando_productos'] = True
+            await safe_answer()
+            await query.message.edit_text(
+                "➕ *Agregar más productos*\n\n"
+                "Escribe los productos adicionales:\n"
+                "`10 t25 negra`\n"
+                "`5 1216 opaca`",
+                parse_mode="Markdown"
+            )
+        
+        elif data == "reiniciar_pedido":
+            if user_id in self.user_sessions:
+                del self.user_sessions[user_id]
+            await safe_answer("🔄 Reiniciado")
+            await query.message.edit_text(
+                "🔄 *Pedido reiniciado*\n\n"
+                "Envía un nuevo mensaje con tu pedido.",
+                parse_mode="Markdown"
+            )
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FLUJO ANTIGUO (compatibilidad con /c y /b)
+        # ═══════════════════════════════════════════════════════════════
+        
+        elif data.startswith("cli:"):
+            # Selección de cliente desde búsqueda /c
+            cliente = data[4:]
+            # Crear nueva sesión para este cliente
+            self.user_sessions[user_id] = {
+                'cliente_confirmado': cliente,
+                'cliente_texto': cliente,
+                'productos_parseados': [],
+                'productos_confirmados': [],
+                'producto_actual_idx': 0,
+                'timestamp': datetime.now(),
+                'esperando_productos': True
+            }
+            await safe_answer(f"✅ {cliente}")
+            
+            await query.message.reply_text(
+                f"👤 *Cliente:* `{cliente}`\n\n"
+                f"📦 Ahora envía los productos:\n"
+                f"`10 t25 negra`\n"
+                f"`5 1216 opaca`\n\n"
+                f"O usa /b para buscar productos",
+                parse_mode="Markdown"
+            )
+        
+        elif data.startswith("prod:"):
+            # Selección de producto desde búsqueda /b
+            producto = data[5:]
+            await safe_answer(f"✅ {producto}")
+            
+            if user_id in self.user_sessions:
+                session = self.user_sessions[user_id]
+                session['productos_confirmados'].append({
+                    'codigo': '',
+                    'descripcion': producto,
+                    'cantidad': 1,
+                    'unidad': 'pza'
+                })
+                
+                resumen = f"👤 *Cliente:* {session.get('cliente_confirmado', 'No seleccionado')}\n\n"
+                resumen += "📦 *Productos:*\n"
+                for p in session['productos_confirmados']:
+                    resumen += f"  • {p['cantidad']}x {p['descripcion']}\n"
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔍 Buscar más", callback_data="buscar_mas_productos")],
+                    [InlineKeyboardButton("✅ Crear Pedido", callback_data="crear_pedido_final")],
+                    [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
+                ]
+                
+                await query.message.reply_text(
+                    resumen,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.message.reply_text(
+                    f"📦 `{producto}`\n\n"
+                    "Primero selecciona un cliente con /c",
+                    parse_mode="Markdown"
+                )
+        
+        elif data == "buscar_mas_productos":
+            await safe_answer()
+            await query.message.reply_text(
+                "🔍 Usa `/b [producto]` para buscar",
+                parse_mode="Markdown"
+            )
+        
+        elif data == "cancelar":
+            if user_id in self.user_sessions:
+                del self.user_sessions[user_id]
+            await safe_answer("❌ Cancelado")
+            await query.message.edit_text(
+                "❌ *Pedido cancelado*",
+                parse_mode="Markdown"
+            )
+        
+        else:
+            await safe_answer()
     
     async def _cmd_stock(self, update, context):
         """Comando /stock - Consulta inventario."""
@@ -902,10 +2177,15 @@ class TabOrdenes:
         clientes = self._buscar_clientes_similares(nombre, 10)
         
         if clientes:
-            respuesta = f"👥 *Clientes encontrados:*\n\n"
+            respuesta = f"👥 *Clientes encontrados:*\n\n_Toca uno para seleccionarlo:_\n"
+            keyboard = []
             for i, cli in enumerate(clientes, 1):
                 respuesta += f"{i}. {cli}\n"
-            await update.message.reply_text(respuesta, parse_mode="Markdown")
+                # Crear botón para cada cliente
+                keyboard.append([InlineKeyboardButton(f"👤 {cli[:35]}", callback_data=f"cli:{cli[:60]}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(respuesta, parse_mode="Markdown", reply_markup=reply_markup)
         else:
             await update.message.reply_text(f"❌ No se encontró cliente '{nombre}'")
     
