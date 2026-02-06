@@ -50,6 +50,16 @@ except ImportError:
     print("⚠️ No se pudo cargar TabAnotaciones")
 
 # ---------------------------------------------------------------------------
+# Importar TabOrdenes para órdenes de venta con Telegram
+# ---------------------------------------------------------------------------
+try:
+    from tabs.tab_ordenes import TabOrdenes
+    HAS_ORDENES = True
+except ImportError:
+    HAS_ORDENES = False
+    print("⚠️ No se pudo cargar TabOrdenes")
+
+# ---------------------------------------------------------------------------
 # Importar base de datos local SQLite para persistencia
 # ---------------------------------------------------------------------------
 try:
@@ -1481,7 +1491,13 @@ class LiquidadorRepartidores:
             self.notebook.add(self.tab_anotaciones, text="  📝 Anotaciones  ")
             self._crear_tab_anotaciones()
 
-        # Pestaña 6 – Créditos (Punteados + Eleventa)
+        # Pestaña 6 – Órdenes de Venta (Telegram)
+        if HAS_ORDENES:
+            self.tab_ordenes = ttk.Frame(self.notebook)
+            self.notebook.add(self.tab_ordenes, text="  🛒 Órdenes Telegram  ")
+            self._crear_tab_ordenes()
+
+        # Pestaña 7 – Créditos (Punteados + Eleventa)
         self.tab_creditos_punteados = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_creditos_punteados, text="  💳 Créditos  ")
         self._crear_tab_creditos_punteados()
@@ -2089,6 +2105,19 @@ class LiquidadorRepartidores:
             print(f"⚠️ Error creando tab anotaciones: {e}")
             ttk.Label(self.tab_anotaciones, 
                      text=f"Error al cargar anotaciones: {e}",
+                     foreground="red").pack(padx=20, pady=20)
+
+    # ------------------------------------------------------------------
+    # CREAR PESTAÑA DE ÓRDENES DE VENTA (TELEGRAM)
+    # ------------------------------------------------------------------
+    def _crear_tab_ordenes(self):
+        """Crea la pestaña de órdenes de venta con bot de Telegram."""
+        try:
+            self.ordenes_widget = TabOrdenes(self.tab_ordenes, self, self.ds)
+        except Exception as e:
+            print(f"⚠️ Error creando tab ordenes: {e}")
+            ttk.Label(self.tab_ordenes, 
+                     text=f"Error al cargar órdenes: {e}",
                      foreground="red").pack(padx=20, pady=20)
 
     # ------------------------------------------------------------------

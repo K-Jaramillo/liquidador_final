@@ -3,5 +3,7 @@ pandas>=1.5.3
 numpy>=1.24
 openpyxl>=3.1.2
 tkcalendar>=1.6.1
+pillow>=10.0.0
+python-telegram-bot>=20.0
 # Optional utilities
 pywin32>=303

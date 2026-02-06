@@ -672,6 +672,31 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_anotaciones_archivada ON anotaciones(archivada)')
     
     # ══════════════════════════════════════════════════════════════════
+    # TABLA: ORDENES_TELEGRAM
+    # Guarda las órdenes de venta recibidas por el bot de Telegram
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ordenes_telegram (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            telegram_user_id INTEGER,
+            telegram_username TEXT,
+            telegram_nombre TEXT,
+            mensaje_original TEXT,
+            cliente TEXT,
+            productos TEXT,
+            notas TEXT,
+            estado TEXT DEFAULT 'pendiente',
+            verificada INTEGER DEFAULT 0,
+            procesada INTEGER DEFAULT 0,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_ordenes_telegram_fecha ON ordenes_telegram(fecha)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_ordenes_telegram_estado ON ordenes_telegram(estado)')
+    
+    # ══════════════════════════════════════════════════════════════════
     # TABLA: HISTORIAL_ABONOS
     # Registra cada abono realizado a un crédito (punteado o eleventa)
     # ══════════════════════════════════════════════════════════════════
@@ -3394,6 +3419,106 @@ def restaurar_anotacion(nota_id: int) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA ÓRDENES DE TELEGRAM
+# ══════════════════════════════════════════════════════════════════════════════
+
+def crear_orden_telegram(fecha: str, telegram_user_id: int, telegram_username: str,
+                         telegram_nombre: str, mensaje_original: str, cliente: str = '',
+                         productos: str = '', notas: str = '') -> int:
+    """Crea una nueva orden de Telegram y retorna su ID."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO ordenes_telegram 
+            (fecha, telegram_user_id, telegram_username, telegram_nombre, 
+             mensaje_original, cliente, productos, notas)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (fecha, telegram_user_id, telegram_username, telegram_nombre,
+              mensaje_original, cliente, productos, notas))
+        orden_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return orden_id
+    except Exception as e:
+        print(f"Error creando orden telegram: {e}")
+        return -1
+
+
+def obtener_ordenes_telegram(fecha: str = None, estado: str = None) -> List[Dict]:
+    """Obtiene órdenes de Telegram, opcionalmente filtradas por fecha y/o estado."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        query = 'SELECT * FROM ordenes_telegram WHERE 1=1'
+        params = []
+        
+        if fecha:
+            query += ' AND fecha = ?'
+            params.append(fecha)
+        if estado:
+            query += ' AND estado = ?'
+            params.append(estado)
+        
+        query += ' ORDER BY fecha_creacion DESC'
+        
+        cursor.execute(query, params)
+        ordenes = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return ordenes
+    except Exception as e:
+        print(f"Error obteniendo órdenes telegram: {e}")
+        return []
+
+
+def actualizar_orden_telegram(orden_id: int, **kwargs) -> bool:
+    """Actualiza una orden de Telegram."""
+    if not kwargs:
+        return False
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        campos = []
+        valores = []
+        for campo, valor in kwargs.items():
+            campos.append(f"{campo} = ?")
+            valores.append(valor)
+        
+        campos.append("fecha_modificacion = CURRENT_TIMESTAMP")
+        valores.append(orden_id)
+        
+        cursor.execute(f'''
+            UPDATE ordenes_telegram 
+            SET {", ".join(campos)}
+            WHERE id = ?
+        ''', valores)
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando orden telegram: {e}")
+        return False
+
+
+def eliminar_orden_telegram(orden_id: int) -> bool:
+    """Elimina una orden de Telegram."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM ordenes_telegram WHERE id = ?', (orden_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error eliminando orden telegram: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # INICIALIZACIÓN AUTOMÁTICA
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -3414,7 +3539,7 @@ else:
                        'pago_proveedores', 'prestamos', 'devoluciones_parciales',
                        'conceptos_gastos', 'creditos_punteados', 'creditos_eleventa', 'pago_nomina', 'pago_socios',
                        'transferencias', 'corte_cajero', 'conteos_sesion', 'conteos_sesion_detalle',
-                       'anotaciones'}
+                       'anotaciones', 'ordenes_telegram'}
     
     if not required_tables.issubset(tables):
         init_database()
