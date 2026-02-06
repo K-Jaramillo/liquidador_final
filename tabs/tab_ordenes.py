@@ -595,13 +595,16 @@ class TabOrdenes:
                 return
             
             # ═══════════════════════════════════════════════════════════
-            # CARGAR TODOS LOS PRODUCTOS
+            # CARGAR TODOS LOS PRODUCTOS CON STOCK REAL DE INVENTARIO_BALANCES
             # ═══════════════════════════════════════════════════════════
             sql_productos = """
                 SET HEADING ON;
-                SELECT CODIGO, DESCRIPCION, DINVENTARIO, PVENTA 
-                FROM PRODUCTOS 
-                ORDER BY DESCRIPCION;
+                SELECT p.CODIGO, p.DESCRIPCION, 
+                       COALESCE(CAST(ib.CANTIDAD_ACTUAL AS INTEGER), 0) AS STOCK, 
+                       p.PVENTA 
+                FROM PRODUCTOS p 
+                LEFT JOIN INVENTARIO_BALANCES ib ON p.ID = ib.PRODUCTO_ID 
+                ORDER BY p.DESCRIPCION;
             """
             ok, stdout, stderr = self.app._ejecutar_sql(sql_productos)
             if ok and stdout:
@@ -1664,6 +1667,50 @@ class TabOrdenes:
             
             await update.message.reply_text(mensaje, parse_mode="Markdown", reply_markup=reply_markup)
     
+    async def _finalizar_pedido(self, query, user_id: int, session: dict, cliente: str, productos: list, forzado: bool = False):
+        """Finaliza y guarda el pedido en la base de datos."""
+        # Formatear productos
+        productos_str = ", ".join([f"{p['cantidad']}x {p['descripcion']}" for p in productos])
+        
+        # Guardar en base de datos
+        if HAS_DB:
+            from datetime import date
+            orden_id = db_local.crear_orden_telegram(
+                fecha=date.today().isoformat(),
+                telegram_user_id=user_id,
+                telegram_username=query.from_user.username or '',
+                telegram_nombre=query.from_user.full_name or query.from_user.first_name,
+                mensaje_original=session.get('mensaje_original', ''),
+                cliente=cliente,
+                productos=productos_str
+            )
+            
+            if orden_id > 0:
+                respuesta = f"✅ *Pedido #{orden_id} Creado*\n\n"
+                if forzado:
+                    respuesta = f"⚠️ *Pedido #{orden_id} Creado (CON ALERTA DE STOCK)*\n\n"
+                respuesta += f"👤 *Cliente:* {cliente}\n\n"
+                respuesta += f"📦 *Productos:*\n"
+                for p in productos:
+                    respuesta += f"  • {p['cantidad']}x {p['descripcion']}\n"
+                    if p.get('codigo'):
+                        respuesta += f"    _{p['codigo']}_\n"
+                respuesta += "\n✅ _Pedido registrado correctamente_"
+                
+                if forzado:
+                    respuesta += "\n\n⚠️ _Recuerda verificar el inventario_"
+                
+                await query.message.edit_text(respuesta, parse_mode="Markdown")
+                self.parent.after(0, self._cargar_ordenes)
+            else:
+                await query.message.edit_text("❌ Error al guardar el pedido")
+        else:
+            await query.message.edit_text("❌ Base de datos no disponible")
+        
+        # Limpiar sesión
+        if user_id in self.user_sessions:
+            del self.user_sessions[user_id]
+    
     async def _confirmar_productos(self, update, user_id: int, editar_mensaje: bool = True):
         """Muestra productos para confirmar con interfaz mejorada."""
         if user_id not in self.user_sessions:
@@ -2139,41 +2186,141 @@ class TabOrdenes:
                 await safe_answer("⚠️ Sin productos confirmados")
                 return
             
-            await safe_answer("✅ Creando pedido...")
+            # ══════════════════════════════════════════════════════════════
+            # VERIFICAR STOCK EN TIEMPO REAL (CONSULTA DIRECTA A FIREBIRD)
+            # ══════════════════════════════════════════════════════════════
+            await safe_answer("⏳ Verificando inventario...")
             
-            # Formatear productos
-            productos_str = ", ".join([f"{p['cantidad']}x {p['descripcion']}" for p in productos])
+            productos_sin_stock = []
+            productos_stock_bajo = []
             
-            # Guardar en base de datos
-            if HAS_DB:
-                from datetime import date
-                orden_id = db_local.crear_orden_telegram(
-                    fecha=date.today().isoformat(),
-                    telegram_user_id=user_id,
-                    telegram_username=query.from_user.username or '',
-                    telegram_nombre=query.from_user.full_name or query.from_user.first_name,
-                    mensaje_original=session.get('mensaje_original', ''),
-                    cliente=cliente,
-                    productos=productos_str
-                )
+            for prod in productos:
+                codigo = prod.get('codigo', '')
+                cantidad_pedida = prod.get('cantidad', 1)
+                descripcion = prod.get('descripcion', prod.get('nombre', ''))
                 
-                if orden_id > 0:
-                    respuesta = f"✅ *Pedido #{orden_id} Creado*\n\n"
-                    respuesta += f"👤 *Cliente:* {cliente}\n\n"
-                    respuesta += f"📦 *Productos:*\n"
-                    for p in productos:
-                        respuesta += f"  • {p['cantidad']}x {p['descripcion']}\n"
-                        if p.get('codigo'):
-                            respuesta += f"    _{p['codigo']}_\n"
-                    respuesta += "\n✅ _Pedido registrado correctamente_"
-                    
-                    await query.message.edit_text(respuesta, parse_mode="Markdown")
-                    self.parent.after(0, self._cargar_ordenes)
-                else:
-                    await query.message.edit_text("❌ Error al guardar el pedido")
+                # Consultar stock en tiempo real desde Firebird (tabla INVENTARIO_BALANCES)
+                stock_actual = None
+                
+                if codigo:
+                    # Consulta directa por código usando JOIN con INVENTARIO_BALANCES
+                    sql = f"""
+                        SET HEADING OFF;
+                        SELECT COALESCE(CAST(ib.CANTIDAD_ACTUAL AS INTEGER), 0) 
+                        FROM PRODUCTOS p 
+                        LEFT JOIN INVENTARIO_BALANCES ib ON p.ID = ib.PRODUCTO_ID 
+                        WHERE p.CODIGO = '{codigo}';
+                    """
+                    ok, stdout, stderr = self.app._ejecutar_sql(sql)
+                    if ok and stdout:
+                        for linea in stdout.strip().split('\n'):
+                            linea = linea.strip()
+                            if linea and linea != '<null>' and not linea.startswith('='):
+                                try:
+                                    stock_actual = int(float(linea))
+                                    break
+                                except:
+                                    pass
+                
+                # Si no encontró por código, buscar por descripción parcial
+                if stock_actual is None and descripcion:
+                    # Limpiar descripción para búsqueda
+                    desc_buscar = descripcion.upper().replace("'", "''")[:30]
+                    sql = f"""
+                        SET HEADING OFF;
+                        SELECT FIRST 1 p.CODIGO, COALESCE(CAST(ib.CANTIDAD_ACTUAL AS INTEGER), 0) 
+                        FROM PRODUCTOS p 
+                        LEFT JOIN INVENTARIO_BALANCES ib ON p.ID = ib.PRODUCTO_ID 
+                        WHERE UPPER(p.DESCRIPCION) LIKE '%{desc_buscar}%';
+                    """
+                    ok, stdout, stderr = self.app._ejecutar_sql(sql)
+                    if ok and stdout:
+                        for linea in stdout.strip().split('\n'):
+                            linea = linea.strip()
+                            if linea and not linea.startswith('='):
+                                partes = linea.split()
+                                if len(partes) >= 2:
+                                    try:
+                                        stock_actual = int(float(partes[-1]))
+                                        break
+                                    except:
+                                        pass
+                
+                # Verificar si hay problema de stock
+                if stock_actual is not None:
+                    if stock_actual <= 0:
+                        productos_sin_stock.append({
+                            'descripcion': descripcion,
+                            'codigo': codigo,
+                            'cantidad': cantidad_pedida,
+                            'stock': stock_actual
+                        })
+                    elif stock_actual < cantidad_pedida:
+                        productos_stock_bajo.append({
+                            'descripcion': descripcion,
+                            'codigo': codigo,
+                            'cantidad': cantidad_pedida,
+                            'stock': stock_actual,
+                            'faltante': cantidad_pedida - stock_actual
+                        })
             
-            # Limpiar sesión
-            del self.user_sessions[user_id]
+            # Si hay problemas de stock, mostrar advertencia
+            if productos_sin_stock or productos_stock_bajo:
+                mensaje = "⚠️ *ALERTA DE INVENTARIO (TIEMPO REAL)*\n\n"
+                
+                if productos_sin_stock:
+                    mensaje += "❌ *Sin stock disponible:*\n"
+                    for p in productos_sin_stock:
+                        codigo_str = f" `[{p.get('codigo', '')}]`" if p.get('codigo') else ""
+                        mensaje += f"  • {p['descripcion']}{codigo_str}\n"
+                        mensaje += f"    _Pedido: {p['cantidad']} | Stock: {p['stock']}_\n"
+                    mensaje += "\n"
+                
+                if productos_stock_bajo:
+                    mensaje += "⚠️ *Stock insuficiente:*\n"
+                    for p in productos_stock_bajo:
+                        codigo_str = f" `[{p.get('codigo', '')}]`" if p.get('codigo') else ""
+                        mensaje += f"  • {p['descripcion']}{codigo_str}\n"
+                        mensaje += f"    _Pedido: {p['cantidad']} | Stock: {p['stock']} | Faltan: {p['faltante']}_\n"
+                    mensaje += "\n"
+                
+                mensaje += "¿Deseas continuar de todas formas?"
+                
+                keyboard = [
+                    [InlineKeyboardButton("✅ Crear de todos modos", callback_data="crear_pedido_forzar")],
+                    [InlineKeyboardButton("❌ Cancelar y revisar", callback_data="cancelar_por_stock")]
+                ]
+                
+                await query.message.edit_text(mensaje, parse_mode="Markdown", 
+                                              reply_markup=InlineKeyboardMarkup(keyboard))
+                return
+            
+            # Si todo está bien, crear el pedido
+            await self._finalizar_pedido(query, user_id, session, cliente, productos)
+        
+        elif data == "crear_pedido_forzar":
+            # Crear pedido aunque no haya stock suficiente
+            if user_id not in self.user_sessions:
+                await safe_answer("⚠️ Sin sesión activa")
+                return
+            
+            session = self.user_sessions[user_id]
+            cliente = session.get('cliente_confirmado', session.get('cliente_texto', ''))
+            productos = session.get('productos_confirmados', [])
+            
+            await safe_answer("✅ Creando pedido...")
+            await self._finalizar_pedido(query, user_id, session, cliente, productos, forzado=True)
+        
+        elif data == "cancelar_por_stock":
+            # Cancelar por falta de stock
+            await safe_answer("❌ Pedido cancelado")
+            await query.message.edit_text(
+                "❌ *Pedido cancelado*\n\n"
+                "Revisa el inventario y vuelve a intentarlo cuando haya stock disponible.",
+                parse_mode="Markdown"
+            )
+            if user_id in self.user_sessions:
+                del self.user_sessions[user_id]
         
         elif data == "agregar_mas_productos":
             # Esperar más productos

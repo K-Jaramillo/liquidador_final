@@ -320,10 +320,16 @@ def init_database():
             concepto TEXT,
             monto REAL NOT NULL DEFAULT 0,
             repartidor TEXT,
+            observaciones TEXT DEFAULT '',
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Agregar columna observaciones si no existe (para bases de datos existentes)
+    try:
+        cursor.execute('ALTER TABLE pago_proveedores ADD COLUMN observaciones TEXT DEFAULT ""')
+    except:
+        pass  # La columna ya existe
     # ══════════════════════════════════════════════════════════════════
     # TABLA: PRESTAMOS
     # Guarda los préstamos realizados a repartidores
@@ -336,10 +342,16 @@ def init_database():
             concepto TEXT,
             monto REAL NOT NULL DEFAULT 0,
             estado TEXT DEFAULT 'pendiente' CHECK(estado IN ('pendiente', 'pagado', 'parcial')),
+            observaciones TEXT DEFAULT '',
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Agregar columna observaciones si no existe (para bases de datos existentes)
+    try:
+        cursor.execute('ALTER TABLE prestamos ADD COLUMN observaciones TEXT DEFAULT ""')
+    except:
+        pass  # La columna ya existe
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: HISTORIAL_LIQUIDACIONES
