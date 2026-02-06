@@ -547,6 +547,26 @@ def init_database():
     except: pass
     
     # ══════════════════════════════════════════════════════════════════
+    # TABLA: NO_ENTREGADOS
+    # Registra las facturas marcadas como "no entregadas"
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS no_entregados (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT NOT NULL,
+            folio INTEGER NOT NULL,
+            cliente TEXT,
+            subtotal REAL DEFAULT 0,
+            repartidor TEXT,
+            observaciones TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(fecha, folio)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_no_entregados_fecha ON no_entregados(fecha)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_no_entregados_folio ON no_entregados(folio)')
+    
+    # ══════════════════════════════════════════════════════════════════
     # TABLA: CREDITOS_ELEVENTA
     # Cache de facturas a crédito del sistema Eleventa (Firebird)
     # ══════════════════════════════════════════════════════════════════
@@ -734,6 +754,23 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_fecha ON historial_abonos(fecha_abono)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_folio ON historial_abonos(folio)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_origen ON historial_abonos(origen)')
+    
+    # ══════════════════════════════════════════════════════════════════
+    # TABLA: SALIDAS_CAJA
+    # Guarda las salidas de efectivo de caja por fecha
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS salidas_caja (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            concepto TEXT NOT NULL,
+            monto REAL NOT NULL DEFAULT 0,
+            observaciones TEXT DEFAULT '',
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_salidas_caja_fecha ON salidas_caja(fecha)')
     
     conn.commit()
     conn.close()
@@ -1996,6 +2033,75 @@ def actualizar_estado_prestamo(prestamo_id: int, estado: str) -> bool:
         return False
 
 
+def obtener_prestamos_pendientes() -> List[Dict]:
+    """Obtiene TODOS los préstamos con estado 'pendiente' o 'parcial' de todas las fechas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM prestamos 
+        WHERE estado IN ('pendiente', 'parcial')
+        ORDER BY fecha DESC, repartidor, fecha_creacion
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_prestamos_por_repartidor_pendientes(repartidor: str) -> List[Dict]:
+    """Obtiene los préstamos pendientes de un repartidor específico."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM prestamos 
+        WHERE repartidor = ? AND estado IN ('pendiente', 'parcial')
+        ORDER BY fecha DESC, fecha_creacion
+    ''', (repartidor,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_total_prestamos_pendientes(repartidor: str = '') -> float:
+    """Obtiene el total de préstamos pendientes, opcionalmente por repartidor."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if repartidor:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM prestamos 
+            WHERE repartidor = ? AND estado IN ('pendiente', 'parcial')
+        ''', (repartidor,))
+    else:
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto), 0) as total
+            FROM prestamos 
+            WHERE estado IN ('pendiente', 'parcial')
+        ''')
+    row = cursor.fetchone()
+    conn.close()
+    return row['total'] if row else 0
+
+
+def obtener_historial_prestamos(repartidor: str = '') -> List[Dict]:
+    """Obtiene el historial completo de préstamos, opcionalmente filtrado por repartidor."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if repartidor:
+        cursor.execute('''
+            SELECT * FROM prestamos 
+            WHERE repartidor = ?
+            ORDER BY fecha DESC, fecha_creacion DESC
+        ''', (repartidor,))
+    else:
+        cursor.execute('''
+            SELECT * FROM prestamos 
+            ORDER BY fecha DESC, repartidor, fecha_creacion DESC
+        ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FUNCIONES PARA HISTORIAL DE LIQUIDACIONES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2269,6 +2375,109 @@ def obtener_total_creditos_punteados_por_folios(fecha: str, folios: list) -> flo
     cursor = conn.cursor()
     placeholders = ','.join('?' * len(folios))
     cursor.execute(f'SELECT COALESCE(SUM(subtotal), 0) FROM creditos_punteados WHERE fecha = ? AND folio IN ({placeholders})', 
+                   [fecha] + folios)
+    total = cursor.fetchone()[0]
+    conn.close()
+    return total or 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA NO ENTREGADOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def agregar_no_entregado(fecha: str, folio: int, cliente: str, subtotal: float, 
+                         repartidor: str = '', observaciones: str = '') -> int:
+    """Marca una factura como no entregada. Retorna el ID."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO no_entregados (fecha, folio, cliente, subtotal, repartidor, observaciones)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fecha, folio) DO UPDATE SET
+                cliente = excluded.cliente,
+                subtotal = excluded.subtotal,
+                repartidor = excluded.repartidor,
+                observaciones = excluded.observaciones
+        ''', (fecha, folio, cliente, subtotal, repartidor, observaciones))
+        conn.commit()
+        no_entregado_id = cursor.lastrowid
+        conn.close()
+        return no_entregado_id
+    except Exception as e:
+        print(f"Error agregando no entregado: {e}")
+        return -1
+
+
+def eliminar_no_entregado(fecha: str, folio: int) -> bool:
+    """Elimina una factura de no entregados."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM no_entregados WHERE fecha = ? AND folio = ?', (fecha, folio))
+        conn.commit()
+        afectados = cursor.rowcount
+        conn.close()
+        return afectados > 0
+    except Exception as e:
+        print(f"Error eliminando no entregado: {e}")
+        return False
+
+
+def obtener_no_entregados_fecha(fecha: str) -> List[Dict]:
+    """Obtiene todos los no entregados de una fecha."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM no_entregados WHERE fecha = ?
+        ORDER BY folio
+    ''', (fecha,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_todos_no_entregados() -> List[Dict]:
+    """Obtiene todos los no entregados de todas las fechas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM no_entregados
+        ORDER BY fecha DESC, folio
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def es_no_entregado(fecha: str, folio: int) -> bool:
+    """Verifica si una factura está marcada como no entregada."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM no_entregados WHERE fecha = ? AND folio = ?', (fecha, folio))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+
+def obtener_total_no_entregados(fecha: str) -> float:
+    """Obtiene el total de no entregados de una fecha."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COALESCE(SUM(subtotal), 0) FROM no_entregados WHERE fecha = ?', (fecha,))
+    total = cursor.fetchone()[0]
+    conn.close()
+    return total or 0.0
+
+
+def obtener_total_no_entregados_por_folios(fecha: str, folios: list) -> float:
+    """Obtiene el total de no entregados de una fecha filtrado por lista de folios."""
+    if not folios:
+        return 0.0
+    conn = get_connection()
+    cursor = conn.cursor()
+    placeholders = ','.join('?' * len(folios))
+    cursor.execute(f'SELECT COALESCE(SUM(subtotal), 0) FROM no_entregados WHERE fecha = ? AND folio IN ({placeholders})', 
                    [fecha] + folios)
     total = cursor.fetchone()[0]
     conn.close()
@@ -3532,6 +3741,89 @@ def eliminar_orden_telegram(orden_id: int) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA SALIDAS DE CAJA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def agregar_salida_caja(fecha: str, concepto: str, monto: float, observaciones: str = '') -> int:
+    """Agrega una nueva salida de caja. Retorna el ID de la salida creada."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO salidas_caja (fecha, concepto, monto, observaciones)
+            VALUES (?, ?, ?, ?)
+        ''', (fecha, concepto, monto, observaciones))
+        conn.commit()
+        salida_id = cursor.lastrowid
+        conn.close()
+        return salida_id
+    except Exception as e:
+        print(f"Error agregando salida de caja: {e}")
+        return -1
+
+
+def obtener_salidas_caja_fecha(fecha: str) -> List[Dict[str, Any]]:
+    """Obtiene las salidas de caja de una fecha específica."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, fecha, concepto, monto, observaciones, fecha_creacion
+        FROM salidas_caja 
+        WHERE fecha = ?
+        ORDER BY id DESC
+    ''', (fecha,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_total_salidas_caja_fecha(fecha: str) -> float:
+    """Obtiene el total de salidas de caja de una fecha."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COALESCE(SUM(monto), 0) as total
+        FROM salidas_caja 
+        WHERE fecha = ?
+    ''', (fecha,))
+    row = cursor.fetchone()
+    conn.close()
+    return row['total'] if row else 0
+
+
+def actualizar_salida_caja(salida_id: int, concepto: str, monto: float, observaciones: str = '') -> bool:
+    """Actualiza una salida de caja existente."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE salidas_caja 
+            SET concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (concepto, monto, observaciones, salida_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando salida de caja: {e}")
+        return False
+
+
+def eliminar_salida_caja(salida_id: int) -> bool:
+    """Elimina una salida de caja por su ID."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM salidas_caja WHERE id = ?', (salida_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error eliminando salida de caja: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # INICIALIZACIÓN AUTOMÁTICA
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -3552,7 +3844,7 @@ else:
                        'pago_proveedores', 'prestamos', 'devoluciones_parciales',
                        'conceptos_gastos', 'creditos_punteados', 'creditos_eleventa', 'pago_nomina', 'pago_socios',
                        'transferencias', 'corte_cajero', 'conteos_sesion', 'conteos_sesion_detalle',
-                       'anotaciones', 'ordenes_telegram'}
+                       'anotaciones', 'ordenes_telegram', 'salidas_caja'}
     
     if not required_tables.issubset(tables):
         init_database()
