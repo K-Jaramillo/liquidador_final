@@ -60,6 +60,11 @@ except ImportError:
     print("⚠️ No se pudo cargar database_local, usando almacenamiento en memoria")
 
 # ---------------------------------------------------------------------------
+# Importar temas de colores
+# ---------------------------------------------------------------------------
+from core.themes import TEMAS, get_tema, get_nombres_temas, get_lista_temas
+
+# ---------------------------------------------------------------------------
 # Funciones de acceso a datos (usan SQLite si está disponible)
 # ---------------------------------------------------------------------------
 def cargar_descuentos():
@@ -687,6 +692,10 @@ class LiquidadorRepartidores:
         # Editor inline activo (referencia para destruirlo si existe)
         self._editor_activo = None
 
+        # Tema actual (valor por defecto)
+        self.tema_actual = 'oscuro'
+        self.modo_oscuro = True
+
         self._crear_interfaz()
 
         # Suscribir las pestañas al DataStore
@@ -711,17 +720,28 @@ class LiquidadorRepartidores:
             if hasattr(self, 'fecha_asign_var'):
                 self.fecha_asign_var.set(fecha)
             
-            # Cargar facturas de Firebird
-            self._cargar_facturas()
+            # Verificar si existe el archivo FDB antes de intentar cargar
+            if not self.ruta_fdb or not os.path.exists(self.ruta_fdb):
+                print(f"⚠️ Archivo de BD Firebird no encontrado: {self.ruta_fdb}")
+                print("   La aplicación funcionará sin datos de Eleventa.")
+                print("   Configura la ruta correcta del archivo PDVDATA.FDB")
+                return
+            
+            # Cargar facturas de Firebird (NO bloquear si falla, NO mostrar diálogos al inicio)
+            try:
+                self._cargar_facturas(mostrar_mensajes=False)
+            except Exception as e:
+                print(f"⚠️ No se pudieron cargar facturas: {e}")
         except Exception as e:
             print(f"⚠️ Error cargando datos iniciales: {e}")
 
     # ------------------------------------------------------------------
-    # CONFIGURAR ESTILOS MEJORADOS - MODO OSCURO/CLARO
+    # CONFIGURAR ESTILOS MEJORADOS - TEMAS DE COLORES
     # ------------------------------------------------------------------
+    
     def _configurar_estilos(self):
         """Configura estilos visuales profesionales para la interfaz."""
-        estilo = ttk.Style()
+        estilo = ttk.Style(self.ventana)
         
         # Usar tema base 'clam' que permite mayor personalización
         try:
@@ -729,72 +749,44 @@ class LiquidadorRepartidores:
         except:
             pass
         
-        # Variable para modo oscuro (por defecto True)
-        if not hasattr(self, 'modo_oscuro'):
-            self.modo_oscuro = True
+        # Variable para el tema actual (por defecto 'oscuro')
+        if not hasattr(self, 'tema_actual'):
+            self.tema_actual = 'oscuro'
+        
+        # Mantener compatibilidad con modo_oscuro
+        self.modo_oscuro = self.tema_actual != 'claro'
         
         self._aplicar_tema()
     
     def _aplicar_tema(self):
-        """Aplica el tema actual (oscuro o claro)."""
-        estilo = ttk.Style()
+        """Aplica el tema actual."""
+        estilo = ttk.Style(self.ventana)
         
-        if self.modo_oscuro:
-            # === COLORES DEL TEMA OSCURO ===
-            PRIMARY = '#2196f3'          # Azul brillante
-            PRIMARY_DARK = '#1976d2'     # Azul oscuro
-            PRIMARY_LIGHT = '#64b5f6'    # Azul claro
-            SUCCESS = '#4caf50'          # Verde
-            SUCCESS_DARK = '#388e3c'
-            WARNING = '#ff9800'          # Naranja
-            ERROR = '#f44336'            # Rojo
-            
-            # Fondos oscuros
-            BG_DARK = '#1e1e1e'          # Fondo principal
-            BG_DARKER = '#121212'        # Fondo más oscuro
-            BG_CARD = '#2d2d2d'          # Fondo de tarjetas/frames
-            BG_HOVER = '#3d3d3d'         # Hover
-            BG_SELECTED = '#0d47a1'      # Selección
-            
-            # Textos
-            TEXT_PRIMARY = '#ffffff'      # Texto principal
-            TEXT_SECONDARY = '#b0b0b0'    # Texto secundario
-            TEXT_MUTED = '#757575'        # Texto apagado
-            
-            # Bordes
-            BORDER_COLOR = '#404040'
-            
-            # Tags de Treeview
-            TREE_ROW_PAR = '#2d2d2d'
-            TREE_ROW_IMPAR = '#3d3d3d'
-        else:
-            # === COLORES DEL TEMA CLARO ===
-            PRIMARY = '#1976d2'          # Azul
-            PRIMARY_DARK = '#0d47a1'     # Azul oscuro
-            PRIMARY_LIGHT = '#42a5f5'    # Azul claro
-            SUCCESS = '#2e7d32'          # Verde
-            SUCCESS_DARK = '#1b5e20'
-            WARNING = '#f57c00'          # Naranja
-            ERROR = '#c62828'            # Rojo
-            
-            # Fondos claros
-            BG_DARK = '#f5f5f5'          # Fondo principal
-            BG_DARKER = '#e0e0e0'        # Fondo más oscuro
-            BG_CARD = '#ffffff'          # Fondo de tarjetas/frames
-            BG_HOVER = '#eeeeee'         # Hover
-            BG_SELECTED = '#bbdefb'      # Selección
-            
-            # Textos
-            TEXT_PRIMARY = '#212121'      # Texto principal
-            TEXT_SECONDARY = '#757575'    # Texto secundario
-            TEXT_MUTED = '#9e9e9e'        # Texto apagado
-            
-            # Bordes
-            BORDER_COLOR = '#bdbdbd'
-            
-            # Tags de Treeview
-            TREE_ROW_PAR = '#ffffff'
-            TREE_ROW_IMPAR = '#f5f5f5'
+        # Obtener colores del tema actual
+        tema = TEMAS.get(self.tema_actual, TEMAS['oscuro'])
+        
+        # Mantener compatibilidad: modo_oscuro es True si no es tema 'claro'
+        self.modo_oscuro = self.tema_actual != 'claro'
+        
+        # Extraer colores del tema
+        PRIMARY = tema['PRIMARY']
+        PRIMARY_DARK = tema['PRIMARY_DARK']
+        PRIMARY_LIGHT = tema['PRIMARY_LIGHT']
+        SUCCESS = tema['SUCCESS']
+        SUCCESS_DARK = tema['SUCCESS_DARK']
+        WARNING = tema['WARNING']
+        ERROR = tema['ERROR']
+        BG_DARK = tema['BG_DARK']
+        BG_DARKER = tema['BG_DARKER']
+        BG_CARD = tema['BG_CARD']
+        BG_HOVER = tema['BG_HOVER']
+        BG_SELECTED = tema['BG_SELECTED']
+        TEXT_PRIMARY = tema['TEXT_PRIMARY']
+        TEXT_SECONDARY = tema['TEXT_SECONDARY']
+        TEXT_MUTED = tema['TEXT_MUTED']
+        BORDER_COLOR = tema['BORDER_COLOR']
+        TREE_ROW_PAR = tema['TREE_ROW_PAR']
+        TREE_ROW_IMPAR = tema['TREE_ROW_IMPAR']
         
         # Guardar colores para uso en otras partes
         self.COLORS = {
@@ -1099,17 +1091,23 @@ class LiquidadorRepartidores:
         # Separador
         ttk.Separator(fila1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         
-        # Switch de tema claro/oscuro
-        self.tema_var = tk.BooleanVar(value=True)  # True = oscuro
-        ttk.Label(fila1, text="☀️").pack(side=tk.LEFT)
-        self.switch_tema = ttk.Checkbutton(
+        # Selector de tema (múltiples opciones)
+        ttk.Label(fila1, text="🎨 Tema:").pack(side=tk.LEFT, padx=(0, 3))
+        
+        # Crear lista de nombres de temas usando funciones del módulo
+        self.nombres_temas = get_nombres_temas()
+        nombres_lista = get_lista_temas()
+        
+        self.tema_combo_var = tk.StringVar(value=TEMAS[self.tema_actual]['nombre'])
+        self.tema_combo = ttk.Combobox(
             fila1, 
-            variable=self.tema_var,
-            command=self._toggle_tema,
-            style="Switch.TCheckbutton"
+            textvariable=self.tema_combo_var,
+            values=nombres_lista,
+            state="readonly",
+            width=15
         )
-        self.switch_tema.pack(side=tk.LEFT, padx=2)
-        ttk.Label(fila1, text="🌙").pack(side=tk.LEFT)
+        self.tema_combo.pack(side=tk.LEFT, padx=2)
+        self.tema_combo.bind("<<ComboboxSelected>>", self._on_tema_cambio)
         
         # ═══════════════════════════════════════════════════════════════
         # FILA 2: Filtros globales (Fecha, Repartidor, Estado)
@@ -1900,7 +1898,8 @@ class LiquidadorRepartidores:
     # ------------------------------------------------------------------
     def _on_filtro_rep_global_cambio(self, event=None):
         """Actualiza TODAS las vistas cuando cambia el repartidor global."""
-        rep_seleccionado = self.filtro_rep_global_var.get()
+        # Leer directamente del widget
+        rep_seleccionado = self.combo_filtro_rep_global.get()
         
         # Sincronizar con el combo de liquidación
         if hasattr(self, 'repartidor_filtro_var'):
@@ -2000,10 +1999,11 @@ class LiquidadorRepartidores:
         """Actualiza el combo de repartidores global con los disponibles."""
         reps = self.ds.get_repartidores()
         valores = ["(Todos)"] + reps
+        valor_actual = self.combo_filtro_rep_global.get()
         self.combo_filtro_rep_global['values'] = valores
         # Si el valor actual no está en la lista, resetear a (Todos)
-        if self.filtro_rep_global_var.get() not in valores:
-            self.filtro_rep_global_var.set("(Todos)")
+        if valor_actual not in valores:
+            self.combo_filtro_rep_global.set("(Todos)")
 
     # ------------------------------------------------------------------
     # CALLBACK GLOBAL: se ejecuta cada vez que el DataStore cambia
@@ -2355,10 +2355,11 @@ class LiquidadorRepartidores:
         self.tree_asign.bind("<Escape>",    self._cerrar_editor)
 
     # --- cargar facturas desde BD ---
-    def _cargar_facturas(self):
+    def _cargar_facturas(self, mostrar_mensajes: bool = True):
         fecha = self.fecha_asign_var.get().strip()
         if not fecha:
-            messagebox.showwarning("Fecha", "Ingresa una fecha válida (YYYY-MM-DD)")
+            if mostrar_mensajes:
+                messagebox.showwarning("Fecha", "Ingresa una fecha válida (YYYY-MM-DD)")
             return
 
         print(f"[DEBUG _cargar_facturas] Cargando facturas para fecha: {fecha}")
@@ -2384,9 +2385,22 @@ class LiquidadorRepartidores:
         )
         ok, stdout, stderr = self._ejecutar_sql(sql)
 
-        if not ok or not stdout:
-            error_msg = stderr or "No se recibieron datos de la BD"
-            messagebox.showerror("Error BD", f"No se pudo consultar:\n{error_msg}")
+        # Si hay error de conexión, mostrar mensaje pero no bloquear
+        if not ok:
+            error_msg = stderr or "No se pudo conectar a la base de datos"
+            print(f"[WARN] Error BD: {error_msg}")
+            if mostrar_mensajes:
+                messagebox.showerror("Error BD", f"No se pudo consultar:\n{error_msg}")
+            # Inicializar con lista vacía para no bloquear la app
+            self.ds.set_ventas([])
+            return
+        
+        # Si no hay stdout pero la conexión fue exitosa, es que no hay datos para esa fecha
+        if not stdout or stdout.strip() == '':
+            print(f"[INFO] No hay ventas para la fecha {fecha}")
+            self.ds.set_ventas([])
+            if mostrar_mensajes:
+                messagebox.showinfo("Sin ventas", f"No hay ventas registradas para {fecha}.\nLa aplicación está lista para usar.")
             return
 
         ventas = []
@@ -2511,11 +2525,17 @@ class LiquidadorRepartidores:
                     msg += f"Total Canceladas (otro día): ${total_canceladas_otro_dia:,.2f}\n"
                 msg += f"Total a Crédito: ${total_credito:,.2f}"
                 
-                messagebox.showinfo("Carga exitosa", msg)
+                if mostrar_mensajes:
+                    messagebox.showinfo("Carga exitosa", msg)
+                print(f"[INFO] {msg.replace(chr(10), ' | ')}")
             else:
-                messagebox.showwarning("Sin datos", f"No hay ventas para {fecha}.")
+                print(f"[INFO] No hay ventas para {fecha}")
+                if mostrar_mensajes:
+                    messagebox.showinfo("Sin ventas", f"No hay ventas registradas para {fecha}.\nLa aplicación está lista para usar.")
         except Exception as e:
-            messagebox.showerror("Error", f"Error procesando facturas:\n{str(e)}")
+            print(f"[ERROR] Error procesando facturas: {e}")
+            if mostrar_mensajes:
+                messagebox.showerror("Error", f"Error procesando facturas:\n{str(e)}")
 
     def _cargar_canceladas_otro_dia(self, fecha: str) -> list:
         """
@@ -3029,7 +3049,7 @@ ORDER BY V.FOLIO, DA.ID;
         """Filtra las facturas según el texto de búsqueda, estado y repartidor seleccionado."""
         texto = self.buscar_asign_var.get().strip().lower()
         estado_filtro = self.filtro_estado_var.get()
-        rep_filtro = self.filtro_rep_global_var.get() if hasattr(self, 'filtro_rep_global_var') else "(Todos)"
+        rep_filtro = self.combo_filtro_rep_global.get() if hasattr(self, 'combo_filtro_rep_global') else "(Todos)"
         
         self.tree_asign.delete(*self.tree_asign.get_children())
         
@@ -3523,11 +3543,14 @@ ORDER BY V.FOLIO, DA.ID;
         return "break"  # Evitar comportamiento por defecto
     
     # ================================================================
-    # TOGGLE DE TEMA CLARO/OSCURO
+    # CAMBIO DE TEMA
     # ================================================================
-    def _toggle_tema(self):
-        """Cambia entre tema claro y oscuro."""
-        self.modo_oscuro = self.tema_var.get()
+    def _on_tema_cambio(self, event=None):
+        """Cambia al tema seleccionado en el combobox."""
+        nombre_tema = self.tema_combo_var.get()
+        tema_id = self.nombres_temas.get(nombre_tema, 'oscuro')
+        self.tema_actual = tema_id
+        self.modo_oscuro = tema_id != 'claro'  # Compatibilidad
         self._aplicar_tema()
         self._actualizar_tags_treeviews()
     
@@ -3688,8 +3711,8 @@ ORDER BY V.FOLIO, DA.ID;
         frame_fin.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 6))
         
         # Configurar grid para que las columnas se expandan uniformemente
-        for i in range(3):
-            frame_fin.columnconfigure(i, weight=1)
+        for i in range(4):  # 4 columnas ahora (3 datos + 1 botón)
+            frame_fin.columnconfigure(i, weight=1 if i < 3 else 0)
 
         # ═══════════════════════════════════════════════════════════════════════
         # COLUMNA 1: DESCUENTOS Y AJUSTES
@@ -3842,6 +3865,16 @@ ORDER BY V.FOLIO, DA.ID;
         ttk.Label(col4, text="Diferencia:", foreground="#9e9e9e").grid(row=7, column=0, sticky=tk.W)
         self.lbl_diferencia_global = ttk.Label(col4, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#9e9e9e")
         self.lbl_diferencia_global.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # COLUMNA 4: BOTÓN ACTUALIZAR
+        # ═══════════════════════════════════════════════════════════════════════
+        col_btn = ttk.Frame(frame_fin)
+        col_btn.grid(row=0, column=3, sticky="nse", padx=(15, 0))
+        
+        btn_actualizar_cuadre = ttk.Button(col_btn, text="🔄 Actualizar Cuadre", 
+                                           command=self._refrescar_liquidacion)
+        btn_actualizar_cuadre.pack(pady=5)
 
         # ═══════════════════════════════════════════════════════════════════════
         # FILA 2: CORTE CAJERO (DATOS DE ELEVENTA)
@@ -4515,18 +4548,11 @@ ORDER BY V.FOLIO, DA.ID;
         reps = self.ds.get_repartidores()
         opciones_filtro = ["(Todos)", "(Sin Asignar)"] + reps
         
-        # Sincronizar con filtro global de repartidor si existe
-        if hasattr(self, 'filtro_rep_global_var'):
-            rep_global = self.filtro_rep_global_var.get()
-            if rep_global and rep_global != "(Todos)" and rep_global in reps:
-                self.repartidor_filtro_var.set(rep_global)
+        # Obtener filtro DIRECTAMENTE del widget combo (no de la variable)
+        filtro = "(Todos)"
+        if hasattr(self, 'combo_filtro_rep_global'):
+            filtro = self.combo_filtro_rep_global.get()
         
-        filtro = self.repartidor_filtro_var.get()
-        if filtro not in opciones_filtro:
-            self.repartidor_filtro_var.set("(Todos)")
-
-        filtro = self.repartidor_filtro_var.get()
-
         # filtrar ventas (excluyendo canceladas del total de ventas efectivas)
         ventas = self.ds.get_ventas()
         if filtro == "(Sin Asignar)":
@@ -4756,11 +4782,13 @@ ORDER BY V.FOLIO, DA.ID;
         total_ingresos = self.ds.get_total_ingresos_extras()
         total_salidas = self.ds.get_total_salidas()
         
-        # 16. Pagos de Nómina (desde SQLite)
-        total_pago_nomina = self.ds.get_total_pagos_nomina()
+        # 16. Pagos de Nómina (desde SQLite) - solo en totales generales según documentación
+        # Nómina es un gasto general del negocio, no se asigna a repartidores individuales
+        total_pago_nomina = self.ds.get_total_pagos_nomina() if not filtro_gastos else 0
         
-        # 17. Pagos a Socios (desde SQLite)
-        total_pago_socios = self.ds.get_total_pagos_socios()
+        # 17. Pagos a Socios (desde SQLite) - solo en totales generales según documentación
+        # Socios es un gasto general del negocio, no se asigna a repartidores individuales
+        total_pago_socios = self.ds.get_total_pagos_socios() if not filtro_gastos else 0
         
         # 18. Transferencias (desde SQLite) - filtrado por repartidor si aplica
         total_transferencias = self.ds.get_total_transferencias(filtro_gastos)
@@ -4845,16 +4873,9 @@ ORDER BY V.FOLIO, DA.ID;
         total_conteo_dinero = self.ds.get_total_dinero(filtro_dinero)
         self.lbl_conteo_dinero_resultado.config(text=f"${total_conteo_dinero:,.2f}")
         
-        # Monto Facturas: pintar el valor de la etiqueta "Monto Efectivo" de TOTALES
-        # Forzar actualización de UI para asegurar que el valor esté sincronizado
-        self.ventana.update_idletasks()
-        monto_facturas_resultado = 0
-        if hasattr(self, 'lbl_monto_efectivo_asign'):
-            try:
-                texto_monto = self.lbl_monto_efectivo_asign.cget("text")
-                monto_facturas_resultado = float(texto_monto.replace("$", "").replace(",", ""))
-            except (ValueError, AttributeError):
-                monto_facturas_resultado = 0
+        # Monto Facturas: usar el valor calculado directamente (total_efectivo)
+        # total_efectivo = Total Vendido - Total a Crédito (ya calculado arriba)
+        monto_facturas_resultado = total_efectivo
         
         self.lbl_monto_facturas_resultado.config(text=f"${monto_facturas_resultado:,.2f}",
                                                   foreground="#2e7d32" if monto_facturas_resultado >= 0 else "#c62828")
@@ -4865,8 +4886,11 @@ ORDER BY V.FOLIO, DA.ID;
         # Créditos Punteados
         self.lbl_creditos_punt_resultado.config(text=f"${total_creditos_punteados:,.2f}")
         
-        # TOTAL DINERO A ENTREGAR = Monto Facturas - Total Descuentos - Créditos Punteados
-        total_dinero_entregar = monto_facturas_resultado - total_descuentos_col2 - total_creditos_punteados
+        # TOTAL DINERO A ENTREGAR según documentación:
+        # EFECTIVO ESPERADO = TOTAL VENTAS - TOTAL DESCUENTOS - CRÉDITOS PUNTEADOS
+        # Aquí: total_efectivo ya tiene descontado el crédito de las ventas
+        # Por tanto: total_dinero_entregar = total_efectivo - total_descuentos - creditos_punteados
+        total_dinero_entregar = total_efectivo - total_descuentos_col2 - total_creditos_punteados
         
         self.lbl_neto.config(text=f"${total_dinero_entregar:,.2f}",
                              foreground="#2e7d32" if total_dinero_entregar >= 0 else "#c62828")
@@ -6727,7 +6751,7 @@ ORDER BY V.FOLIO, DA.ID;
         frame_tipo = ttk.Frame(frame)
         frame_tipo.pack(fill=tk.X, pady=5)
         ttk.Label(frame_tipo, text="Tipo:", width=12).pack(side=tk.LEFT)
-        tipo_var = tk.StringVar(value=tipo_inicial)
+        tipo_var = tk.StringVar(master=dialog, value=tipo_inicial)
         tipos_disponibles = self.ds.get_conceptos_gastos()
         if not tipos_disponibles:
             tipos_disponibles = ["GASTO", "PRÉSTAMO", "PAGO PROVEEDOR"]
@@ -6739,7 +6763,7 @@ ORDER BY V.FOLIO, DA.ID;
         frame_rep = ttk.Frame(frame)
         frame_rep.pack(fill=tk.X, pady=5)
         ttk.Label(frame_rep, text="Repartidor:", width=12).pack(side=tk.LEFT)
-        rep_var = tk.StringVar(value=values[2])
+        rep_var = tk.StringVar(master=dialog, value=values[2])
         rep_combo = ttk.Combobox(frame_rep, textvariable=rep_var, width=30, 
                                   values=self.ds.get_repartidores())
         rep_combo.pack(side=tk.LEFT, padx=5)
@@ -6748,7 +6772,7 @@ ORDER BY V.FOLIO, DA.ID;
         frame_conc = ttk.Frame(frame)
         frame_conc.pack(fill=tk.X, pady=5)
         ttk.Label(frame_conc, text="Concepto:", width=12).pack(side=tk.LEFT)
-        conc_var = tk.StringVar(value=values[3])
+        conc_var = tk.StringVar(master=dialog, value=values[3])
         conc_combo = ttk.Combobox(frame_conc, textvariable=conc_var, width=32,
                                    values=self.ds.get_conceptos_gastos())
         conc_combo.pack(side=tk.LEFT, padx=5)
@@ -6758,7 +6782,7 @@ ORDER BY V.FOLIO, DA.ID;
         frame_monto.pack(fill=tk.X, pady=5)
         ttk.Label(frame_monto, text="Monto:", width=12).pack(side=tk.LEFT)
         monto_str = values[4].replace("$", "").replace(",", "")
-        monto_var = tk.StringVar(value=monto_str)
+        monto_var = tk.StringVar(master=dialog, value=monto_str)
         ttk.Entry(frame_monto, textvariable=monto_var, width=15).pack(side=tk.LEFT, padx=5)
         ttk.Label(frame_monto, text="$").pack(side=tk.LEFT)
         
@@ -6766,7 +6790,7 @@ ORDER BY V.FOLIO, DA.ID;
         frame_obs = ttk.Frame(frame)
         frame_obs.pack(fill=tk.X, pady=5)
         ttk.Label(frame_obs, text="Observaciones:", width=12).pack(side=tk.LEFT)
-        obs_var = tk.StringVar(value=values[5] if len(values) > 5 else '')
+        obs_var = tk.StringVar(master=dialog, value=values[5] if len(values) > 5 else '')
         ttk.Entry(frame_obs, textvariable=obs_var, width=35).pack(side=tk.LEFT, padx=5)
         
         # Botones
@@ -8272,7 +8296,7 @@ def main():
     ventana.configure(bg="#1e1e1e")  # Fondo oscuro por defecto
 
     # Estilo global - Modo oscuro
-    estilo = ttk.Style()
+    estilo = ttk.Style(ventana)
     estilo.theme_use('clam')  # tema que permite mayor personalización
 
     app = LiquidadorRepartidores(ventana)

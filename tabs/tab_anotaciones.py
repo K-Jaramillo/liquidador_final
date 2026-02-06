@@ -464,7 +464,7 @@ class TabAnotaciones:
             return
         
         fecha = self._fecha_actual()
-        filtro = self.filtro_notas_var.get()
+        filtro = self.filtro_notas_var.get() if self.filtro_notas_var else "Activas"
         
         # Obtener notas según el filtro actual (incluir eliminadas para poder filtrar)
         notas = db_local.obtener_anotaciones(incluir_archivadas=True, fecha=fecha, incluir_eliminadas=True)
@@ -531,7 +531,11 @@ class TabAnotaciones:
         self._cargando = True
         
         # Obtener valores de variables tkinter en el hilo principal ANTES de crear el hilo
-        filtro = self.filtro_notas_var.get()
+        # Verificar que filtro_notas_var esté inicializado
+        if self.filtro_notas_var is None:
+            filtro = "Activas"
+        else:
+            filtro = self.filtro_notas_var.get()
         fecha = self._fecha_actual()
         
         def cargar_datos():
@@ -1400,7 +1404,7 @@ class TabAnotaciones:
         ttk.Label(frame, text="¿Qué prioridad tiene esta nota?", 
                   font=("Segoe UI", 11, "bold")).pack(pady=(0, 15))
         
-        prioridad_var = tk.StringVar(value='normal')
+        prioridad_var = tk.StringVar(master=dialog, value='normal')
         
         # Radiobuttons de prioridad
         radio_frame = ttk.Frame(frame)
@@ -1465,9 +1469,10 @@ class TabAnotaciones:
             color = config['color']
             orden = config['orden']
             
-            # Calcular posición según prioridad
-            # Las urgentes/altas van primero, las normales/bajas después
-            x, y = self._calcular_posicion_por_prioridad(orden)
+            # Calcular posición - usar siguiente posición disponible (sin separar por prioridad)
+            x, y = self._calcular_siguiente_posicion()
+            
+            print(f"[DEBUG] Posición calculada: x={x}, y={y}")
             
             # Usar la fecha del DataStore para consistencia
             fecha = self._fecha_actual()
