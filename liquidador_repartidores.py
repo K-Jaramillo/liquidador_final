@@ -6029,7 +6029,14 @@ ORDER BY V.FOLIO, DA.ID;
                     self.ventana.after(0, self._limpiar_corte_cajero)
                     return
                 
-                print(f"[DEBUG CORTE] ✅ Corte cargado - Dinero en caja total: ${corte.dinero_en_caja.total:,.2f}")
+                print(f"[DEBUG CORTE] ✅ Corte cargado - Desglose:")
+                print(f"[DEBUG CORTE]   Fondo de caja:        ${corte.dinero_en_caja.fondo_de_caja:,.2f}")
+                print(f"[DEBUG CORTE]   Ventas efectivo:      ${corte.dinero_en_caja.ventas_en_efectivo:,.2f}")
+                print(f"[DEBUG CORTE]   Abonos efectivo:      ${corte.dinero_en_caja.abonos_en_efectivo:,.2f}")
+                print(f"[DEBUG CORTE]   Entradas:             ${corte.dinero_en_caja.entradas:,.2f}")
+                print(f"[DEBUG CORTE]   Salidas (Firebird):   ${corte.dinero_en_caja.salidas:,.2f}")
+                print(f"[DEBUG CORTE]   Devoluciones efect:   ${corte.dinero_en_caja.devoluciones_en_efectivo:,.2f}")
+                print(f"[DEBUG CORTE]   TOTAL DINERO CAJA:    ${corte.dinero_en_caja.total:,.2f}")
                 
                 # ═══════════════════════════════════════════════════════════
                 # GUARDAR EN SQLite - Persistir los datos del corte cajero
@@ -6088,15 +6095,15 @@ ORDER BY V.FOLIO, DA.ID;
             total_efectivo = corte.dinero_en_caja.ventas_en_efectivo + corte.dinero_en_caja.entradas
             self.lbl_corte_total_efectivo.config(text=f"${total_efectivo:,.2f}")
             
-            # Usar salidas de Firebird (como en MAIN) - las salidas locales se muestran por separado
+            # Usar salidas de Firebird (como en MAIN)
             self.lbl_corte_salidas.config(text=f"${corte.dinero_en_caja.salidas:,.2f}")
             self.lbl_corte_dev_efectivo.config(text=f"${corte.dinero_en_caja.devoluciones_en_efectivo:,.2f}")
             
             # Usar el total de Firebird directamente (como en MAIN)
-            self.lbl_corte_total_dinero.config(text=f"${corte.dinero_en_caja.total:,.2f}")
+            total_dinero_caja = corte.dinero_en_caja.total
+            self.lbl_corte_total_dinero.config(text=f"${total_dinero_caja:,.2f}")
             
             # --- ACTUALIZAR TOTAL DINERO CAJA EN CUADRE GENERAL ---
-            total_dinero_caja = corte.dinero_en_caja.total
             self.lbl_total_dinero_cuadre.config(text=f"${total_dinero_caja:,.2f}")
             
             # Recalcular TOTAL EFECTIVO CAJA en CUADRE GENERAL
@@ -6169,6 +6176,7 @@ ORDER BY V.FOLIO, DA.ID;
             
             # --- ACTUALIZAR RESUMEN EN MÓDULO DE ASIGNACIÓN ---
             if hasattr(self, 'lbl_corte_asign_dinero'):
+                # Usar total de Firebird (como en MAIN)
                 self.lbl_corte_asign_dinero.config(text=f"${corte.dinero_en_caja.total:,.2f}")
                 self.lbl_corte_asign_ventas.config(text=f"${corte.ventas.total:,.2f}")
                 self.lbl_corte_asign_ganancia.config(text=f"${corte.ganancia:,.2f}")
@@ -6293,9 +6301,6 @@ ORDER BY V.FOLIO, DA.ID;
                 if corte_anterior.ventas.ventas_efectivo > 0:
                     corte = corte_anterior
             
-            # --- OBTENER SALIDAS DE CAJA DESDE BASE DE DATOS LOCAL ---
-            salidas_caja_local = self.ds.get_total_salidas_caja()
-            
             # --- ACTUALIZAR LABELS DE DINERO EN CAJA ---
             self.lbl_corte_fondo_caja.config(text=f"${corte.dinero_en_caja.fondo_de_caja:,.2f}")
             self.lbl_corte_ventas_efectivo.config(text=f"${corte.dinero_en_caja.ventas_en_efectivo:,.2f}")
@@ -6306,19 +6311,12 @@ ORDER BY V.FOLIO, DA.ID;
             total_efectivo = corte.dinero_en_caja.ventas_en_efectivo + corte.dinero_en_caja.entradas
             self.lbl_corte_total_efectivo.config(text=f"${total_efectivo:,.2f}")
             
-            # USAR SALIDAS DE CAJA LOCALES en lugar de Firebird
-            self.lbl_corte_salidas.config(text=f"${salidas_caja_local:,.2f}")
+            # Usar salidas de Firebird (como en MAIN)
+            self.lbl_corte_salidas.config(text=f"${corte.dinero_en_caja.salidas:,.2f}")
             self.lbl_corte_dev_efectivo.config(text=f"${corte.dinero_en_caja.devoluciones_en_efectivo:,.2f}")
             
-            # Recalcular total dinero caja con salidas locales
-            total_dinero_caja = (
-                corte.dinero_en_caja.fondo_de_caja +
-                corte.dinero_en_caja.ventas_en_efectivo +
-                corte.dinero_en_caja.abonos_en_efectivo +
-                corte.dinero_en_caja.entradas -
-                salidas_caja_local -
-                corte.dinero_en_caja.devoluciones_en_efectivo
-            )
+            # Usar el total de Firebird directamente (como en MAIN)
+            total_dinero_caja = corte.dinero_en_caja.total
             self.lbl_corte_total_dinero.config(text=f"${total_dinero_caja:,.2f}")
             
             # --- ACTUALIZAR TOTAL DINERO CAJA EN CUADRE GENERAL ---
