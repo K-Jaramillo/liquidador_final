@@ -161,41 +161,52 @@ class TabOrdenes:
         main_frame.columnconfigure(1, weight=1)
         main_frame.rowconfigure(0, weight=1)
         
-        # Panel izquierdo: Lista de órdenes
+        # Panel izquierdo: Lista de órdenes como sticky notes
         ordenes_frame = ttk.LabelFrame(main_frame, text="📋 Órdenes Recibidas", padding=5)
         ordenes_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         ordenes_frame.columnconfigure(0, weight=1)
         ordenes_frame.rowconfigure(0, weight=1)
         
-        # Treeview para órdenes
-        columns = ("id", "hora", "vendedor", "cliente", "productos", "estado")
-        self.tree_ordenes = ttk.Treeview(ordenes_frame, columns=columns, show="headings", height=15)
+        # Canvas con scroll para sticky notes
+        canvas_container = ttk.Frame(ordenes_frame)
+        canvas_container.grid(row=0, column=0, sticky="nsew")
+        canvas_container.columnconfigure(0, weight=1)
+        canvas_container.rowconfigure(0, weight=1)
         
-        self.tree_ordenes.heading("id", text="ID")
-        self.tree_ordenes.heading("hora", text="Hora")
-        self.tree_ordenes.heading("vendedor", text="Vendedor")
-        self.tree_ordenes.heading("cliente", text="Cliente")
-        self.tree_ordenes.heading("productos", text="Productos")
-        self.tree_ordenes.heading("estado", text="Estado")
+        # Fondo tipo corcho/pizarra para las notas
+        self.canvas_ordenes = tk.Canvas(canvas_container, bg="#e8e0d5", highlightthickness=0)
+        scrollbar_y = ttk.Scrollbar(canvas_container, orient=tk.VERTICAL, command=self.canvas_ordenes.yview)
+        scrollbar_x = ttk.Scrollbar(canvas_container, orient=tk.HORIZONTAL, command=self.canvas_ordenes.xview)
         
-        self.tree_ordenes.column("id", width=40, anchor="center")
-        self.tree_ordenes.column("hora", width=70, anchor="center")
-        self.tree_ordenes.column("vendedor", width=100)
-        self.tree_ordenes.column("cliente", width=120)
-        self.tree_ordenes.column("productos", width=200)
-        self.tree_ordenes.column("estado", width=80, anchor="center")
+        self.canvas_ordenes.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
         
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(ordenes_frame, orient=tk.VERTICAL, command=self.tree_ordenes.yview)
-        self.tree_ordenes.configure(yscrollcommand=scrollbar.set)
+        self.canvas_ordenes.grid(row=0, column=0, sticky="nsew")
+        scrollbar_y.grid(row=0, column=1, sticky="ns")
+        scrollbar_x.grid(row=1, column=0, sticky="ew")
         
-        self.tree_ordenes.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        # Frame interno para los sticky notes
+        self.frame_ordenes_notas = ttk.Frame(self.canvas_ordenes)
+        self.canvas_ordenes.create_window((0, 0), window=self.frame_ordenes_notas, anchor="nw")
         
-        # Tags para estados
-        self.tree_ordenes.tag_configure("pendiente", background="#fff3e0", foreground="#e65100")
-        self.tree_ordenes.tag_configure("verificada", background="#e8f5e9", foreground="#2e7d32")
-        self.tree_ordenes.tag_configure("procesada", background="#e3f2fd", foreground="#1565c0")
+        # Bind para actualizar scroll region
+        self.frame_ordenes_notas.bind("<Configure>", 
+            lambda e: self.canvas_ordenes.configure(scrollregion=self.canvas_ordenes.bbox("all")))
+        
+        # Bind mousewheel
+        self.canvas_ordenes.bind("<Enter>", lambda e: self.canvas_ordenes.bind_all("<MouseWheel>", 
+            lambda ev: self.canvas_ordenes.yview_scroll(int(-1*(ev.delta/120)), "units")))
+        self.canvas_ordenes.bind("<Leave>", lambda e: self.canvas_ordenes.unbind_all("<MouseWheel>"))
+        
+        # Variable para orden seleccionada
+        self.orden_seleccionada_id = None
+        self.sticky_widgets = {}  # {orden_id: frame_widget}
+        
+        # Colores mejorados para estados de sticky notes (estilo post-it)
+        self.colores_estado = {
+            "pendiente": {"bg": "#fff59d", "border": "#f9a825", "fg": "#4e342e"},   # Amarillo post-it
+            "verificada": {"bg": "#a5d6a7", "border": "#2e7d32", "fg": "#1b5e20"},   # Verde menta
+            "procesada": {"bg": "#90caf9", "border": "#1565c0", "fg": "#0d47a1"},    # Azul cielo
+        }
         
         # Botones de acción para órdenes
         btn_ordenes_frame = ttk.Frame(ordenes_frame)
@@ -246,9 +257,6 @@ class TabOrdenes:
         self.lbl_fecha_orden = ttk.Label(info_frame, text="-")
         self.lbl_fecha_orden.grid(row=2, column=1, sticky="w", padx=(10, 0))
         
-        # Bind selección
-        self.tree_ordenes.bind("<<TreeviewSelect>>", self._on_orden_select)
-        
         # ══════════════════════════════════════════════════════════════
         # PANEL INFERIOR: Comandos disponibles
         # ══════════════════════════════════════════════════════════════
@@ -297,95 +305,230 @@ class TabOrdenes:
             messagebox.showinfo("Guardado", "Token guardado correctamente")
     
     def _cargar_ordenes(self):
-        """Carga las órdenes de la fecha actual."""
+        """Carga las órdenes de la fecha actual como sticky notes."""
         if not HAS_DB:
             return
         
-        # Limpiar treeview
-        for item in self.tree_ordenes.get_children():
-            self.tree_ordenes.delete(item)
+        # Limpiar sticky notes anteriores
+        for widget in self.frame_ordenes_notas.winfo_children():
+            widget.destroy()
+        self.sticky_widgets.clear()
         
         fecha = self._fecha_actual()
         ordenes = db_local.obtener_ordenes_telegram(fecha=fecha)
+        print(f"[ORDENES] Cargadas {len(ordenes)} órdenes de la fecha {fecha}")
+        
+        # Calcular columnas según el ancho del canvas
+        columnas = 3
+        col = 0
+        row = 0
         
         for orden in ordenes:
+            orden_id = orden['id']
             hora = orden.get('fecha_creacion', '')
             if hora and len(hora) > 10:
                 hora = hora[11:16]  # Extraer HH:MM
             
             estado = orden.get('estado', 'pendiente')
-            tag = estado
+            colores = self.colores_estado.get(estado, self.colores_estado['pendiente'])
             
-            self.tree_ordenes.insert("", "end", values=(
-                orden['id'],
-                hora,
-                orden.get('telegram_nombre', 'Desconocido'),
-                orden.get('cliente', '-'),
-                orden.get('productos', '-')[:50],
-                estado.capitalize()
-            ), tags=(tag,))
+            # Crear sticky note (Frame)
+            sticky = tk.Frame(self.frame_ordenes_notas, 
+                             bg=colores['bg'], 
+                             bd=2, 
+                             relief="raised",
+                             highlightbackground=colores['border'],
+                             highlightthickness=3,
+                             cursor="hand2")
+            sticky.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+            
+            # Configurar tamaño mínimo del sticky
+            sticky.configure(width=220, height=180)
+            sticky.pack_propagate(False)
+            
+            # Header con ID y hora - más prominente
+            header = tk.Frame(sticky, bg=colores['border'], height=28)
+            header.pack(fill=tk.X)
+            header.pack_propagate(False)
+            
+            tk.Label(header, text=f"📋 #{orden_id}", 
+                    font=("Segoe UI", 11, "bold"), 
+                    bg=colores['border'], fg="white").pack(side=tk.LEFT, padx=8, pady=3)
+            tk.Label(header, text=f"🕐 {hora}", 
+                    font=("Segoe UI", 9, "bold"), 
+                    bg=colores['border'], fg="white").pack(side=tk.RIGHT, padx=8, pady=3)
+            
+            # Contenido principal
+            content = tk.Frame(sticky, bg=colores['bg'], padx=10, pady=8)
+            content.pack(fill=tk.BOTH, expand=True)
+            
+            # Vendedor con icono más visible
+            vendedor_frame = tk.Frame(content, bg=colores['bg'])
+            vendedor_frame.pack(fill=tk.X, pady=(0, 3))
+            tk.Label(vendedor_frame, text="👤", font=("Segoe UI", 10), 
+                    bg=colores['bg']).pack(side=tk.LEFT)
+            tk.Label(vendedor_frame, text=orden.get('telegram_nombre', 'Desconocido'), 
+                    font=("Segoe UI", 10, "bold"), 
+                    bg=colores['bg'], fg=colores['fg']).pack(side=tk.LEFT, padx=(3, 0))
+            
+            # Separador visual
+            sep1 = tk.Frame(content, bg=colores['border'], height=1)
+            sep1.pack(fill=tk.X, pady=4)
+            
+            # Cliente con mejor formato
+            cliente = orden.get('cliente', '-') or '-'
+            cliente_frame = tk.Frame(content, bg=colores['bg'])
+            cliente_frame.pack(fill=tk.X, pady=(0, 3))
+            tk.Label(cliente_frame, text="🏪", font=("Segoe UI", 9), 
+                    bg=colores['bg']).pack(side=tk.LEFT)
+            tk.Label(cliente_frame, text=f" {cliente[:28]}{'...' if len(cliente) > 28 else ''}", 
+                    font=("Segoe UI", 9), 
+                    bg=colores['bg'], fg=colores['fg']).pack(side=tk.LEFT)
+            
+            # Separador visual
+            sep2 = tk.Frame(content, bg=colores['border'], height=1)
+            sep2.pack(fill=tk.X, pady=4)
+            
+            # Productos - MEJORADO: cada producto en su línea
+            productos_raw = orden.get('productos', '-') or '-'
+            productos_list = [p.strip() for p in productos_raw.split(',') if p.strip()]
+            
+            # Frame para productos con scroll si son muchos
+            productos_frame = tk.Frame(content, bg=colores['bg'])
+            productos_frame.pack(fill=tk.BOTH, expand=True)
+            
+            tk.Label(productos_frame, text="📦 Productos:", 
+                    font=("Segoe UI", 8, "bold"), 
+                    bg=colores['bg'], fg=colores['fg'],
+                    anchor="w").pack(fill=tk.X)
+            
+            # Mostrar hasta 4 productos con bullets
+            for i, prod in enumerate(productos_list[:4]):
+                prod_display = prod if len(prod) <= 28 else prod[:25] + "..."
+                tk.Label(productos_frame, text=f"  • {prod_display}", 
+                        font=("Segoe UI", 8), 
+                        bg=colores['bg'], fg=colores['fg'],
+                        anchor="w").pack(fill=tk.X)
+            
+            # Si hay más productos, mostrar indicador
+            if len(productos_list) > 4:
+                tk.Label(productos_frame, text=f"  (+{len(productos_list) - 4} más...)", 
+                        font=("Segoe UI", 7, "italic"), 
+                        bg=colores['bg'], fg="#888888",
+                        anchor="w").pack(fill=tk.X)
+            
+            # Footer con estado
+            footer = tk.Frame(sticky, bg=colores['border'], height=24)
+            footer.pack(fill=tk.X, side=tk.BOTTOM)
+            footer.pack_propagate(False)
+            
+            estado_emoji = {"pendiente": "⏳ Pendiente", "verificada": "✅ Verificada", "procesada": "📦 Procesada"}.get(estado, "❓ Desconocido")
+            tk.Label(footer, text=estado_emoji, 
+                    font=("Segoe UI", 9, "bold"), 
+                    bg=colores['border'], fg="white").pack(expand=True)
+            
+            # Bind click para seleccionar - recursivo para todos los widgets
+            def bind_click(widget, oid):
+                widget.bind("<Button-1>", lambda e, o=oid: self._seleccionar_orden(o))
+                for child in widget.winfo_children():
+                    bind_click(child, oid)
+            
+            bind_click(sticky, orden_id)
+            
+            # Guardar referencia
+            self.sticky_widgets[orden_id] = sticky
+            
+            # Siguiente posición
+            col += 1
+            if col >= columnas:
+                col = 0
+                row += 1
+        
+        # Actualizar scroll region
+        self.frame_ordenes_notas.update_idletasks()
+        self.canvas_ordenes.configure(scrollregion=self.canvas_ordenes.bbox("all"))
     
-    def _on_orden_select(self, event):
+    def _seleccionar_orden(self, orden_id):
+        """Selecciona una orden y muestra su detalle."""
+        # Deseleccionar anterior
+        if self.orden_seleccionada_id and self.orden_seleccionada_id in self.sticky_widgets:
+            old_sticky = self.sticky_widgets[self.orden_seleccionada_id]
+            # Restaurar borde normal
+            if HAS_DB:
+                fecha = self._fecha_actual()
+                ordenes = db_local.obtener_ordenes_telegram(fecha=fecha)
+                old_orden = next((o for o in ordenes if o['id'] == self.orden_seleccionada_id), None)
+                if old_orden:
+                    estado = old_orden.get('estado', 'pendiente')
+                    colores = self.colores_estado.get(estado, self.colores_estado['pendiente'])
+                    old_sticky.config(highlightbackground=colores['border'], highlightthickness=2)
+        
+        # Seleccionar nueva
+        self.orden_seleccionada_id = orden_id
+        if orden_id in self.sticky_widgets:
+            sticky = self.sticky_widgets[orden_id]
+            sticky.config(highlightbackground="#d32f2f", highlightthickness=4)  # Borde rojo para selección
+        
+        # Mostrar detalle
+        self._mostrar_detalle_orden(orden_id)
+    
+    def _mostrar_detalle_orden(self, orden_id):
         """Muestra el detalle de la orden seleccionada."""
-        selection = self.tree_ordenes.selection()
-        if not selection:
+        if not HAS_DB:
             return
         
-        item = self.tree_ordenes.item(selection[0])
-        orden_id = item['values'][0]
+        fecha = self._fecha_actual()
+        ordenes = db_local.obtener_ordenes_telegram(fecha=fecha)
+        orden = next((o for o in ordenes if o['id'] == orden_id), None)
         
-        # Buscar orden completa
-        if HAS_DB:
-            fecha = self._fecha_actual()
-            ordenes = db_local.obtener_ordenes_telegram(fecha=fecha)
-            orden = next((o for o in ordenes if o['id'] == orden_id), None)
+        if orden:
+            # Actualizar detalle
+            self.txt_mensaje.config(state=tk.NORMAL)
+            self.txt_mensaje.delete("1.0", tk.END)
+            self.txt_mensaje.insert("1.0", orden.get('mensaje_original', ''))
+            self.txt_mensaje.config(state=tk.DISABLED)
             
-            if orden:
-                # Actualizar detalle
-                self.txt_mensaje.config(state=tk.NORMAL)
-                self.txt_mensaje.delete("1.0", tk.END)
-                self.txt_mensaje.insert("1.0", orden.get('mensaje_original', ''))
-                self.txt_mensaje.config(state=tk.DISABLED)
-                
-                self.lbl_vendedor.config(text=orden.get('telegram_nombre', '-'))
-                self.lbl_username.config(text=f"@{orden.get('telegram_username', '-')}")
-                self.lbl_fecha_orden.config(text=orden.get('fecha_creacion', '-'))
+            self.lbl_vendedor.config(text=orden.get('telegram_nombre', '-'))
+            self.lbl_username.config(text=f"@{orden.get('telegram_username', '-')}")
+            self.lbl_fecha_orden.config(text=orden.get('fecha_creacion', '-'))
+    
+    def _on_orden_select(self, event):
+        """Muestra el detalle de la orden seleccionada (legacy - ya no se usa)."""
+        pass
     
     def _verificar_orden(self):
         """Marca la orden seleccionada como verificada."""
-        selection = self.tree_ordenes.selection()
-        if not selection:
+        if not self.orden_seleccionada_id:
             messagebox.showwarning("Selección", "Selecciona una orden primero")
             return
         
-        orden_id = self.tree_ordenes.item(selection[0])['values'][0]
+        orden_id = self.orden_seleccionada_id
         if HAS_DB:
             db_local.actualizar_orden_telegram(orden_id, estado='verificada', verificada=1)
             self._cargar_ordenes()
     
     def _procesar_orden(self):
         """Marca la orden seleccionada como procesada."""
-        selection = self.tree_ordenes.selection()
-        if not selection:
+        if not self.orden_seleccionada_id:
             messagebox.showwarning("Selección", "Selecciona una orden primero")
             return
         
-        orden_id = self.tree_ordenes.item(selection[0])['values'][0]
+        orden_id = self.orden_seleccionada_id
         if HAS_DB:
             db_local.actualizar_orden_telegram(orden_id, estado='procesada', procesada=1)
             self._cargar_ordenes()
     
     def _eliminar_orden(self):
         """Elimina la orden seleccionada."""
-        selection = self.tree_ordenes.selection()
-        if not selection:
+        if not self.orden_seleccionada_id:
             messagebox.showwarning("Selección", "Selecciona una orden primero")
             return
         
         if messagebox.askyesno("Confirmar", "¿Eliminar esta orden?"):
-            orden_id = self.tree_ordenes.item(selection[0])['values'][0]
+            orden_id = self.orden_seleccionada_id
             if HAS_DB:
                 db_local.eliminar_orden_telegram(orden_id)
+                self.orden_seleccionada_id = None
                 self._cargar_ordenes()
     
     # ══════════════════════════════════════════════════════════════════
@@ -394,29 +537,27 @@ class TabOrdenes:
     
     def _crear_venta_firebird(self):
         """Abre el diálogo para crear una venta en Firebird desde la orden seleccionada."""
-        selection = self.tree_ordenes.selection()
-        if not selection:
+        if not self.orden_seleccionada_id:
             messagebox.showwarning("Selección", "Selecciona una orden primero")
             return
         
-        # Obtener datos de la orden
-        item = self.tree_ordenes.item(selection[0])
-        valores = item['values']
-        orden_id = valores[0]
-        cliente = valores[3] if len(valores) > 3 else ''
-        productos_texto = valores[4] if len(valores) > 4 else ''
+        orden_id = self.orden_seleccionada_id
         
-        # Obtener mensaje original de la BD
+        # Obtener datos de la orden desde la BD
         if HAS_DB:
-            ordenes = db_local.obtener_ordenes_telegram(orden_id=orden_id)
-            if ordenes:
-                orden_data = ordenes[0]
+            fecha = self._fecha_actual()
+            ordenes = db_local.obtener_ordenes_telegram(fecha=fecha)
+            orden_data = next((o for o in ordenes if o['id'] == orden_id), None)
+            
+            if orden_data:
+                cliente = orden_data.get('cliente', '')
                 mensaje_original = orden_data.get('mensaje_original', '')
-                cliente = orden_data.get('cliente', cliente)
             else:
-                mensaje_original = productos_texto
+                messagebox.showerror("Error", "No se encontró la orden")
+                return
         else:
-            mensaje_original = productos_texto
+            messagebox.showerror("Error", "Base de datos no disponible")
+            return
         
         # Abrir diálogo de creación de venta
         dialogo = DialogoCrearVenta(

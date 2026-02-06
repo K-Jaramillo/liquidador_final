@@ -3439,9 +3439,10 @@ def crear_orden_telegram(fecha: str, telegram_user_id: int, telegram_username: s
         orden_id = cursor.lastrowid
         conn.commit()
         conn.close()
+        print(f"[DB] ✅ Orden #{orden_id} guardada en SQLite - Cliente: {cliente}, Productos: {productos[:50]}...")
         return orden_id
     except Exception as e:
-        print(f"Error creando orden telegram: {e}")
+        print(f"[DB] ❌ Error creando orden telegram: {e}")
         return -1
 
 
