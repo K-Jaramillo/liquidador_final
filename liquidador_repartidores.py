@@ -644,6 +644,30 @@ class LiquidadorRepartidores:
         # Cargar datos de la fecha actual al iniciar (con pequeño delay para que la GUI esté lista)
         self.ventana.after(500, self._cargar_datos_inicial)
     
+    def _crear_tooltip(self, widget, texto):
+        """Crea un tooltip (mensaje emergente) para un widget."""
+        tooltip = None
+        
+        def mostrar(event):
+            nonlocal tooltip
+            x = widget.winfo_rootx() + 20
+            y = widget.winfo_rooty() + widget.winfo_height() + 5
+            tooltip = tk.Toplevel(widget)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{x}+{y}")
+            label = tk.Label(tooltip, text=texto, background="#333333", foreground="white",
+                           relief="solid", borderwidth=1, font=("Segoe UI", 9))
+            label.pack()
+        
+        def ocultar(event):
+            nonlocal tooltip
+            if tooltip:
+                tooltip.destroy()
+                tooltip = None
+        
+        widget.bind("<Enter>", mostrar)
+        widget.bind("<Leave>", ocultar)
+    
     def _cargar_configuracion_rutas(self):
         """Carga las rutas de BD desde la configuración guardada."""
         # Ruta por defecto para LiquiVentas
@@ -941,19 +965,29 @@ class LiquidadorRepartidores:
                    expand=[("selected", (1, 1, 1, 0))])
         
         # === ESTILOS DE FRAME ===
+        # Por defecto los frames usan BG_CARD para coincidir con LabelFrames
         estilo.configure("TFrame",
-                        background=BG_DARK)
+                        background=BG_CARD)
         estilo.configure("Card.TFrame",
                         background=BG_CARD)
         estilo.configure("Dark.TFrame",
-                        background=BG_DARKER)
+                        background=BG_DARK)
+        estilo.configure("Toolbar.TFrame",
+                        background=BG_DARK)
         
         # === ESTILOS DE LABEL ===
+        # Los labels por defecto usan BG_CARD para coincidir con LabelFrames
         estilo.configure("TLabel",
                         background=BG_CARD,
                         foreground=TEXT_PRIMARY,
                         font=("Segoe UI", 9))
+        estilo.configure("Card.TLabel",
+                        background=BG_CARD,
+                        foreground=TEXT_PRIMARY)
         estilo.configure("Dark.TLabel",
+                        background=BG_DARK,
+                        foreground=TEXT_PRIMARY)
+        estilo.configure("Toolbar.TLabel",
                         background=BG_DARK,
                         foreground=TEXT_PRIMARY)
         estilo.configure("Title.TLabel",
@@ -1141,7 +1175,7 @@ class LiquidadorRepartidores:
         entry_fdb = ttk.Entry(fila1, textvariable=self.ruta_fdb_var, width=50)
         entry_fdb.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
-        ttk.Button(fila1, text="📂 Examinar", command=self._seleccionar_archivo_fdb, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(fila1, text="Examinar...", command=self._seleccionar_archivo_fdb, width=10).pack(side=tk.LEFT, padx=2)
         ttk.Button(fila1, text="🔗 Verificar", command=self._verificar_conexion_bd, width=10).pack(side=tk.LEFT, padx=2)
         
         # Indicador de estado
@@ -1188,8 +1222,10 @@ class LiquidadorRepartidores:
             self.fecha_global_entry.bind("<FocusOut>", self._on_fecha_global_cambio)
         
         # Botón para cargar datos de la fecha seleccionada
-        ttk.Button(fila2, text="📥 Cargar", width=10,
-                   command=self._on_fecha_global_cambio).pack(side=tk.LEFT, padx=(0, 5))
+        btn_cargar = ttk.Button(fila2, text="📥", width=3,
+                   command=self._on_fecha_global_cambio)
+        btn_cargar.pack(side=tk.LEFT, padx=(0, 5))
+        self._crear_tooltip(btn_cargar, "Cargar")
         
         # Botones de navegación de fecha
         ttk.Button(fila2, text="◀", width=3,
@@ -1215,7 +1251,7 @@ class LiquidadorRepartidores:
         ttk.Separator(fila2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         
         # Filtro general por estado (visible desde todas las pestañas)
-        ttk.Label(fila2, text="🔍 Estado:").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(fila2, text="\u25BC Estado:").pack(side=tk.LEFT, padx=(0, 3))
         self.filtro_estado_var = tk.StringVar(value="Todos")
         self.combo_filtro_estado = ttk.Combobox(fila2, textvariable=self.filtro_estado_var,
                                     values=["Todos", "Sin Repartidor", "Canceladas", "Crédito"],
@@ -1227,7 +1263,7 @@ class LiquidadorRepartidores:
         ttk.Separator(fila2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         
         # Buscador global (cliente/folio)
-        ttk.Label(fila2, text="🔎 Buscar Cliente:").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(fila2, text="\u2315 Cliente (F10):").pack(side=tk.LEFT, padx=(0, 3))
         self.buscar_global_var = tk.StringVar()
         self.entry_buscar_global = ttk.Entry(fila2, textvariable=self.buscar_global_var, width=20)
         self.entry_buscar_global.pack(side=tk.LEFT, padx=(0, 3))
@@ -1238,13 +1274,22 @@ class LiquidadorRepartidores:
         ttk.Button(fila2, text="✕", width=2,
                    command=self._limpiar_buscar_global).pack(side=tk.LEFT)
         
+        # Separador antes de botones de acción
+        ttk.Separator(fila2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Botones de acción (movidos desde abajo)
+        ttk.Button(fila2, text="💾 Liquidación",
+                   command=self._guardar_liquidacion, style="Success.TButton").pack(side=tk.LEFT, padx=3)
+        ttk.Button(fila2, text="📄 Gen. Reporte",
+                   command=self._generar_reporte).pack(side=tk.LEFT, padx=3)
+        
         # ===== NOTEBOOK (PESTAÑAS) =====
         self.notebook = ttk.Notebook(self.ventana)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Pestaña 0 – Asignar Repartidores
+        # Pestaña 0 – Asignar Repartidor
         self.tab_asignacion = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_asignacion, text="  Asignar Repartidores  ")
+        self.notebook.add(self.tab_asignacion, text="  Asignar Repartidor  ")
         self._crear_tab_asignacion()
 
         # Pestaña 1 – Liquidación
@@ -1267,12 +1312,7 @@ class LiquidadorRepartidores:
         self.notebook.add(self.tab_dinero, text="  Conteo de Dinero  ")
         self._crear_tab_dinero()
 
-        # Pestaña 5 – Auditoría de Corte
-        self.tab_auditoria = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_auditoria, text="  📊 Auditoría de Corte  ")
-        self._crear_tab_auditoria()
-
-        # Pestaña 6 – Anotaciones (Sticky Notes)
+        # Pestaña 5 – Anotaciones (Sticky Notes) - antes era Auditoría
         if HAS_ANOTACIONES:
             self.tab_anotaciones = ttk.Frame(self.notebook)
             self.notebook.add(self.tab_anotaciones, text="  📝 Anotaciones  ")
@@ -2140,7 +2180,7 @@ class LiquidadorRepartidores:
         # Botón GUARDAR (deshabilitado por defecto)
         self.btn_guardar_asign = ttk.Button(
             frame_top, 
-            text="💾 GUARDAR CAMBIOS",
+            text="💾 GUARDAR",
             command=self._guardar_cambios_repartidores,
             state="disabled",
             style="Success.TButton"
@@ -2327,7 +2367,7 @@ class LiquidadorRepartidores:
         # TABLA DE FACTURAS - Ocupa el espacio restante
         # ============================================================
         frame_tree = ttk.LabelFrame(self.tab_asignacion,
-                                    text="📋 FACTURAS DEL DÍA  –  Enter para editar repartidor | Tab para siguiente",
+                                    text="📋 FACTURAS DEL DÍA",
                                     padding=(5, 5))
         frame_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
 
@@ -3714,25 +3754,13 @@ ORDER BY V.FOLIO, DA.ID;
         # (El primero queda más abajo)
         # ============================================================
         
-        # --- dinero contado + diferencia (más abajo de todo) ---
+        # --- Labels ocultos para mantener lógica (no se muestran pero se actualizan) ---
+        # Estos labels son necesarios porque el código los actualiza en otras partes
         frame_inf = ttk.Frame(self.tab_liquidacion)
-        frame_inf.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 8))
-
-        ttk.Label(frame_inf, text="💵 Dinero Contado:").pack(side=tk.LEFT, padx=(0, 4))
+        # No empaquetamos frame_inf - solo creamos los labels para que existan
         self.lbl_dinero_contado = ttk.Label(frame_inf, text="$0.00", font=("Segoe UI", 10, "bold"))
-        self.lbl_dinero_contado.pack(side=tk.LEFT, padx=(0, 20))
-
-        ttk.Label(frame_inf, text="📊 Diferencia:").pack(side=tk.LEFT, padx=(0, 4))
         self.lbl_diferencia = ttk.Label(frame_inf, text="$0.00",
                                         font=("Segoe UI", 10, "bold"), foreground="red")
-        self.lbl_diferencia.pack(side=tk.LEFT, padx=(0, 20))
-
-        ttk.Button(frame_inf, text="📄  Generar Reporte",
-                   command=self._generar_reporte).pack(side=tk.RIGHT, padx=5)
-        
-        # Botón GUARDAR LIQUIDACIÓN
-        ttk.Button(frame_inf, text="💾 Guardar Liquidación",
-                   command=self._guardar_liquidacion, style="Success.TButton").pack(side=tk.RIGHT, padx=5)
 
         # --- CUADRE ALMACEN (CAJA) ---
         frame_fin = ttk.LabelFrame(self.tab_liquidacion, text="📦 CUADRE ALMACEN (CAJA)", padding=(10, 8))
