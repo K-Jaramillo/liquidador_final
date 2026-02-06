@@ -1566,6 +1566,11 @@ class LiquidadorRepartidores:
         self.notebook.add(self.tab_prestamos, text="  💵 Préstamos  ")
         self._crear_tab_prestamos()
 
+        # Pestaña 9 – No Entregados
+        self.tab_no_entregados = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_no_entregados, text="  📦 No Entregados  ")
+        self._crear_tab_no_entregados()
+
     # ------------------------------------------------------------------
     # CREAR PESTAÑA DE CRÉDITOS
     # ------------------------------------------------------------------
@@ -2835,6 +2840,339 @@ class LiquidadorRepartidores:
             # Datos
             for row_idx, item in enumerate(self.tree_prestamos.get_children(), 2):
                 values = self.tree_prestamos.item(item, "values")
+                for col, val in enumerate(values, 1):
+                    ws.cell(row=row_idx, column=col, value=val)
+            
+            # Ajustar anchos
+            for col in ws.columns:
+                max_length = max(len(str(cell.value or "")) for cell in col)
+                ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+            
+            wb.save(archivo)
+            messagebox.showinfo("Éxito", f"Archivo guardado:\n{archivo}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al exportar: {e}")
+
+    # ==================================================================
+    # PESTAÑA – NO ENTREGADOS
+    # ==================================================================
+    def _crear_tab_no_entregados(self):
+        """Crea la pestaña de facturas no entregadas."""
+        tab = self.tab_no_entregados
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # BARRA DE HERRAMIENTAS
+        # ═══════════════════════════════════════════════════════════════
+        frame_tools = ttk.Frame(tab)
+        frame_tools.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        
+        # Filtro por repartidor
+        ttk.Label(frame_tools, text="🚚 Repartidor:").pack(side=tk.LEFT, padx=(0, 5))
+        self.filtro_rep_no_entreg_var = tk.StringVar(master=self.ventana, value="(Todos)")
+        self.combo_filtro_rep_no_entreg = ttk.Combobox(
+            frame_tools, 
+            textvariable=self.filtro_rep_no_entreg_var,
+            values=["(Todos)"],
+            width=15,
+            state="readonly"
+        )
+        self.combo_filtro_rep_no_entreg.pack(side=tk.LEFT, padx=5)
+        self.combo_filtro_rep_no_entreg.bind("<<ComboboxSelected>>", lambda e: self._refrescar_tab_no_entregados())
+        
+        # Filtro por fecha
+        ttk.Label(frame_tools, text="📅 Fecha:").pack(side=tk.LEFT, padx=(20, 5))
+        self.filtro_fecha_no_entreg_var = tk.StringVar(master=self.ventana, value="Hoy")
+        self.combo_filtro_fecha_no_entreg = ttk.Combobox(
+            frame_tools,
+            textvariable=self.filtro_fecha_no_entreg_var,
+            values=["Hoy", "Última semana", "Último mes", "Todos"],
+            width=15,
+            state="readonly"
+        )
+        self.combo_filtro_fecha_no_entreg.pack(side=tk.LEFT, padx=5)
+        self.combo_filtro_fecha_no_entreg.bind("<<ComboboxSelected>>", lambda e: self._refrescar_tab_no_entregados())
+        
+        # Botón refrescar
+        ttk.Button(frame_tools, text="🔄 Refrescar", 
+                   command=self._refrescar_tab_no_entregados).pack(side=tk.LEFT, padx=20)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # TABLA DE NO ENTREGADOS
+        # ═══════════════════════════════════════════════════════════════
+        frame_tabla = ttk.LabelFrame(tab, text="📦 FACTURAS NO ENTREGADAS", padding=(5, 5))
+        frame_tabla.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        frame_tabla.columnconfigure(0, weight=1)
+        frame_tabla.rowconfigure(0, weight=1)
+        
+        # Treeview
+        columns = ("id", "fecha", "folio", "cliente", "subtotal", "repartidor", "observaciones")
+        self.tree_no_entregados = ttk.Treeview(
+            frame_tabla,
+            columns=columns,
+            show="headings",
+            selectmode="extended",
+            height=15
+        )
+        
+        # Configurar columnas
+        self.tree_no_entregados.column("id", width=50, anchor=tk.CENTER)
+        self.tree_no_entregados.column("fecha", width=100, anchor=tk.CENTER)
+        self.tree_no_entregados.column("folio", width=80, anchor=tk.CENTER)
+        self.tree_no_entregados.column("cliente", width=250, anchor=tk.W)
+        self.tree_no_entregados.column("subtotal", width=100, anchor=tk.E)
+        self.tree_no_entregados.column("repartidor", width=120, anchor=tk.CENTER)
+        self.tree_no_entregados.column("observaciones", width=200, anchor=tk.W)
+        
+        # Encabezados
+        self.tree_no_entregados.heading("id", text="ID")
+        self.tree_no_entregados.heading("fecha", text="📅 Fecha")
+        self.tree_no_entregados.heading("folio", text="📋 Folio")
+        self.tree_no_entregados.heading("cliente", text="👤 Cliente")
+        self.tree_no_entregados.heading("subtotal", text="💵 Subtotal")
+        self.tree_no_entregados.heading("repartidor", text="🚚 Repartidor")
+        self.tree_no_entregados.heading("observaciones", text="📝 Observaciones")
+        
+        # Scrollbars
+        scroll_y = ttk.Scrollbar(frame_tabla, orient=tk.VERTICAL, command=self.tree_no_entregados.yview)
+        scroll_x = ttk.Scrollbar(frame_tabla, orient=tk.HORIZONTAL, command=self.tree_no_entregados.xview)
+        self.tree_no_entregados.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        
+        self.tree_no_entregados.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        
+        # Tags para colores por tema
+        self.tree_no_entregados.tag_configure("no_entregado", 
+            background="#6a1b9a" if self.modo_oscuro else "#e1bee7", 
+            foreground="#ffffff" if self.modo_oscuro else "#4a148c")
+        
+        # Bindings
+        self.tree_no_entregados.bind("<Double-1>", self._editar_no_entregado_doble_clic)
+        self.tree_no_entregados.bind("<Button-3>", self._on_no_entregados_right_click)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # TOTALES
+        # ═══════════════════════════════════════════════════════════════
+        frame_totales = ttk.LabelFrame(tab, text="📊 RESUMEN", padding=(10, 5))
+        frame_totales.grid(row=2, column=0, sticky="ew", padx=10, pady=(5, 10))
+        
+        # Total No Entregado
+        frame_t1 = ttk.Frame(frame_totales)
+        frame_t1.pack(side=tk.LEFT, padx=20)
+        ttk.Label(frame_t1, text="TOTAL NO ENTREGADO:", 
+                  font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        tema = TEMAS.get(self.tema_actual, TEMAS['oscuro'])
+        color_warning = tema.get('WARNING', '#e65100')
+        self.lbl_total_no_entregados_tab = ttk.Label(frame_t1, text="$0.00", 
+                                                      font=("Segoe UI", 12, "bold"), 
+                                                      foreground=color_warning)
+        self.lbl_total_no_entregados_tab.pack(side=tk.LEFT, padx=10)
+        
+        # Cantidad de facturas
+        frame_t2 = ttk.Frame(frame_totales)
+        frame_t2.pack(side=tk.LEFT, padx=20)
+        ttk.Label(frame_t2, text="Facturas:", 
+                  font=("Segoe UI", 10)).pack(side=tk.LEFT)
+        self.lbl_cantidad_no_entregados = ttk.Label(frame_t2, text="0", 
+                                                     font=("Segoe UI", 11, "bold"))
+        self.lbl_cantidad_no_entregados.pack(side=tk.LEFT, padx=5)
+        
+        # Botones de acción
+        frame_btns = ttk.Frame(frame_totales)
+        frame_btns.pack(side=tk.RIGHT, padx=10)
+        
+        ttk.Button(frame_btns, text="🗑️ Quitar No Entregado", 
+                   command=self._quitar_no_entregado).pack(side=tk.LEFT, padx=5)
+        ttk.Button(frame_btns, text="📤 Exportar", 
+                   command=self._exportar_no_entregados).pack(side=tk.LEFT, padx=5)
+    
+    def _refrescar_tab_no_entregados(self):
+        """Refresca la tabla de no entregados."""
+        # Limpiar tabla
+        self.tree_no_entregados.delete(*self.tree_no_entregados.get_children())
+        
+        # Actualizar combo de repartidores
+        reps = list(set([n['repartidor'] for n in db_local.obtener_todos_no_entregados() if n.get('repartidor')]))
+        reps.sort()
+        self.combo_filtro_rep_no_entreg['values'] = ["(Todos)"] + reps
+        
+        # Obtener filtros
+        filtro_rep = self.filtro_rep_no_entreg_var.get()
+        filtro_fecha = self.filtro_fecha_no_entreg_var.get()
+        
+        # Obtener no entregados según filtro de fecha
+        if filtro_fecha == "Hoy":
+            no_entregados = db_local.obtener_no_entregados_fecha(self.ds.fecha)
+        elif filtro_fecha == "Última semana":
+            from datetime import datetime, timedelta
+            fecha_limite = (datetime.strptime(self.ds.fecha, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+            todos = db_local.obtener_todos_no_entregados()
+            no_entregados = [n for n in todos if n['fecha'] >= fecha_limite]
+        elif filtro_fecha == "Último mes":
+            from datetime import datetime, timedelta
+            fecha_limite = (datetime.strptime(self.ds.fecha, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
+            todos = db_local.obtener_todos_no_entregados()
+            no_entregados = [n for n in todos if n['fecha'] >= fecha_limite]
+        else:  # Todos
+            no_entregados = db_local.obtener_todos_no_entregados()
+        
+        # Filtrar por repartidor
+        if filtro_rep != "(Todos)":
+            no_entregados = [n for n in no_entregados if n.get('repartidor') == filtro_rep]
+        
+        # Insertar en tabla
+        total_no_entregado = 0
+        for n in no_entregados:
+            self.tree_no_entregados.insert("", tk.END,
+                                            iid=f"noentreg_{n['id']}",
+                                            values=(
+                                                n['id'],
+                                                n['fecha'],
+                                                n['folio'],
+                                                n.get('cliente', ''),
+                                                f"${n['subtotal']:,.2f}",
+                                                n.get('repartidor', ''),
+                                                n.get('observaciones', '') or ''
+                                            ),
+                                            tags=("no_entregado",))
+            total_no_entregado += n['subtotal']
+        
+        # Actualizar totales
+        self.lbl_total_no_entregados_tab.config(text=f"${total_no_entregado:,.2f}")
+        self.lbl_cantidad_no_entregados.config(text=str(len(no_entregados)))
+    
+    def _editar_no_entregado_doble_clic(self, event):
+        """Abre diálogo para editar observaciones de un no entregado."""
+        sel = self.tree_no_entregados.selection()
+        if not sel:
+            return
+        
+        values = self.tree_no_entregados.item(sel[0], "values")
+        if not values:
+            return
+        
+        item_id = int(values[0])
+        fecha = values[1]
+        folio = int(values[2])
+        
+        # Diálogo simple para editar observaciones
+        dialog = tk.Toplevel(self.ventana)
+        dialog.title("📝 Editar Observaciones")
+        dialog.geometry("400x150")
+        dialog.resizable(False, False)
+        dialog.transient(self.ventana)
+        
+        dialog.update_idletasks()
+        x = self.ventana.winfo_x() + (self.ventana.winfo_width() - 400) // 2
+        y = self.ventana.winfo_y() + (self.ventana.winfo_height() - 150) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        dialog.wait_visibility()
+        dialog.grab_set()
+        
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text=f"Folio: {folio} - Fecha: {fecha}", 
+                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        ttk.Label(frame, text="Observaciones:").pack(anchor=tk.W)
+        obs_var = tk.StringVar(master=dialog, value=values[6] if len(values) > 6 else "")
+        entry_obs = ttk.Entry(frame, textvariable=obs_var, width=50)
+        entry_obs.pack(fill=tk.X, pady=5)
+        entry_obs.focus_set()
+        
+        def guardar():
+            # Actualizar en BD (necesitamos obtener el registro completo)
+            no_entregados = db_local.obtener_no_entregados_fecha(fecha)
+            for n in no_entregados:
+                if n['folio'] == folio:
+                    db_local.agregar_no_entregado(
+                        fecha, folio, n['cliente'], n['subtotal'],
+                        n.get('repartidor', ''), obs_var.get()
+                    )
+                    break
+            self._refrescar_tab_no_entregados()
+            dialog.destroy()
+        
+        frame_btns = ttk.Frame(frame)
+        frame_btns.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(frame_btns, text="💾 Guardar", command=guardar).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(frame_btns, text="❌ Cancelar", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
+    
+    def _on_no_entregados_right_click(self, event):
+        """Menú contextual para la tabla de no entregados."""
+        row_id = self.tree_no_entregados.identify_row(event.y)
+        if row_id:
+            self.tree_no_entregados.selection_set(row_id)
+        
+        menu = tk.Menu(self.ventana, tearoff=0)
+        menu.add_command(label="📋 Copiar fila", 
+                         command=lambda: self._copiar_seleccion_tree(self.tree_no_entregados))
+        menu.add_command(label="📋 Copiar todo", 
+                         command=lambda: self._copiar_toda_tabla(self.tree_no_entregados))
+        menu.add_separator()
+        menu.add_command(label="🗑️ Quitar No Entregado", command=self._quitar_no_entregado)
+        
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+    
+    def _quitar_no_entregado(self):
+        """Quita la marca de no entregado de las facturas seleccionadas."""
+        sel = self.tree_no_entregados.selection()
+        if not sel:
+            messagebox.showwarning("Selección", "Selecciona al menos una factura.")
+            return
+        
+        if not messagebox.askyesno("Confirmar", 
+                                    f"¿Quitar marca de no entregado de {len(sel)} factura(s)?"):
+            return
+        
+        for item_id in sel:
+            values = self.tree_no_entregados.item(item_id, "values")
+            if values:
+                fecha = values[1]
+                folio = int(values[2])
+                db_local.eliminar_no_entregado(fecha, folio)
+        
+        self._refrescar_tab_no_entregados()
+        self._refrescar_liquidacion()
+        messagebox.showinfo("Éxito", f"Se quitó la marca de {len(sel)} factura(s).")
+    
+    def _exportar_no_entregados(self):
+        """Exporta los no entregados a Excel."""
+        from tkinter import filedialog
+        
+        archivo = filedialog.asksaveasfilename(
+            title="Guardar no entregados",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfilename=f"no_entregados_{self.ds.fecha}.xlsx"
+        )
+        
+        if not archivo:
+            return
+        
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "No Entregados"
+            
+            # Encabezados
+            headers = ["ID", "Fecha", "Folio", "Cliente", "Subtotal", "Repartidor", "Observaciones"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="6A1B9A", end_color="6A1B9A", fill_type="solid")
+                cell.font = Font(bold=True, color="FFFFFF")
+            
+            # Datos
+            for row_idx, item in enumerate(self.tree_no_entregados.get_children(), 2):
+                values = self.tree_no_entregados.item(item, "values")
                 for col, val in enumerate(values, 1):
                     ws.cell(row=row_idx, column=col, value=val)
             
@@ -4443,6 +4781,12 @@ ORDER BY V.FOLIO, DA.ID;
             self.tree_prestamos.tag_configure("pagado", 
                 background="#2e7d32" if self.modo_oscuro else "#e8f5e9", 
                 foreground="#ffffff" if self.modo_oscuro else "#1b5e20")
+        
+        # Tags para tree_no_entregados (Tab No Entregados)
+        if hasattr(self, 'tree_no_entregados'):
+            self.tree_no_entregados.tag_configure("no_entregado", 
+                background="#6a1b9a" if self.modo_oscuro else "#e1bee7", 
+                foreground="#ffffff" if self.modo_oscuro else "#4a148c")
         
         # Refrescar las vistas para aplicar cambios
         if hasattr(self, 'ds') and self.ds.get_ventas():
