@@ -534,7 +534,8 @@ def init_database():
             total_credito REAL DEFAULT 0,
             abono REAL DEFAULT 0,
             estado TEXT DEFAULT 'PENDIENTE',
-            repartidor TEXT,
+            repartidor TEXT DEFAULT '',
+            observaciones TEXT DEFAULT '',
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fecha, folio)
@@ -549,6 +550,12 @@ def init_database():
     except: pass
     try:
         cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN estado TEXT DEFAULT "PENDIENTE"')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN repartidor TEXT DEFAULT ""')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN observaciones TEXT DEFAULT ""')
     except: pass
     
     # ══════════════════════════════════════════════════════════════════
@@ -2267,7 +2274,7 @@ def guardar_credito_eleventa(fecha: str, folio: int, ticket_id: int, cliente: st
 
 def guardar_creditos_eleventa_bulk(fecha: str, creditos: List[Dict]) -> int:
     """Guarda múltiples créditos de Eleventa. Retorna cantidad guardada.
-    IMPORTANTE: Preserva abono y estado existentes."""
+    IMPORTANTE: Preserva abono, estado, repartidor y observaciones existentes."""
     if not creditos:
         return 0
     
@@ -2275,18 +2282,18 @@ def guardar_creditos_eleventa_bulk(fecha: str, creditos: List[Dict]) -> int:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Insertar o actualizar (preservando abono y estado)
+        # Insertar o actualizar (preservando abono, estado, repartidor y observaciones)
+        # SOLO se actualizan los datos que vienen de Eleventa: ticket_id, cliente, subtotal, total_credito
         count = 0
         for c in creditos:
             cursor.execute('''
-                INSERT INTO creditos_eleventa (fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO creditos_eleventa (fecha, folio, ticket_id, cliente, subtotal, total_credito)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fecha, folio) DO UPDATE SET
                     ticket_id = excluded.ticket_id,
                     cliente = excluded.cliente,
                     subtotal = excluded.subtotal,
                     total_credito = excluded.total_credito,
-                    repartidor = excluded.repartidor,
                     fecha_modificacion = CURRENT_TIMESTAMP
             ''', (
                 fecha,
@@ -2294,8 +2301,7 @@ def guardar_creditos_eleventa_bulk(fecha: str, creditos: List[Dict]) -> int:
                 c.get('id', 0),
                 c.get('nombre', ''),
                 c.get('subtotal', 0),
-                c.get('total_credito', 0),
-                c.get('repartidor', '')
+                c.get('total_credito', 0)
             ))
             count += 1
         
@@ -2313,7 +2319,7 @@ def obtener_creditos_eleventa_fecha(fecha: str) -> List[Dict]:
     cursor = conn.cursor()
     cursor.execute('''
         SELECT id, fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor,
-               fecha_creacion, fecha_modificacion
+               abono, estado, observaciones, fecha_creacion, fecha_modificacion
         FROM creditos_eleventa 
         WHERE fecha = ?
         ORDER BY folio
@@ -2329,7 +2335,7 @@ def obtener_todos_creditos_eleventa() -> List[Dict]:
     cursor = conn.cursor()
     cursor.execute('''
         SELECT id, fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor,
-               abono, estado, fecha_creacion, fecha_modificacion
+               abono, estado, observaciones, fecha_creacion, fecha_modificacion
         FROM creditos_eleventa
         ORDER BY fecha DESC, folio
     ''')
@@ -2625,6 +2631,106 @@ def actualizar_estado_credito_eleventa(fecha: str, folio: int, estado: str) -> b
     except Exception as e:
         print(f"Error actualizando estado crédito Eleventa: {e}")
         return False
+
+
+def actualizar_repartidor_credito_punteado(fecha: str, folio: int, repartidor: str) -> bool:
+    """Actualiza el repartidor de un crédito punteado."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE creditos_punteados 
+            SET repartidor = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE fecha = ? AND folio = ?
+        ''', (repartidor, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando repartidor crédito punteado: {e}")
+        return False
+
+
+def actualizar_repartidor_credito_eleventa(fecha: str, folio: int, repartidor: str) -> bool:
+    """Actualiza el repartidor de un crédito Eleventa."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE creditos_eleventa 
+            SET repartidor = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE fecha = ? AND folio = ?
+        ''', (repartidor, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando repartidor crédito Eleventa: {e}")
+        return False
+
+
+def actualizar_observaciones_credito_punteado(fecha: str, folio: int, observaciones: str) -> bool:
+    """Actualiza las observaciones de un crédito punteado."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE creditos_punteados 
+            SET observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE fecha = ? AND folio = ?
+        ''', (observaciones, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando observaciones crédito punteado: {e}")
+        return False
+
+
+def actualizar_observaciones_credito_eleventa(fecha: str, folio: int, observaciones: str) -> bool:
+    """Actualiza las observaciones de un crédito Eleventa."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE creditos_eleventa 
+            SET observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            WHERE fecha = ? AND folio = ?
+        ''', (observaciones, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando observaciones crédito Eleventa: {e}")
+        return False
+
+
+def obtener_credito_punteado(fecha: str, folio: int) -> Dict:
+    """Obtiene un crédito punteado específico por fecha y folio."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM creditos_punteados WHERE fecha = ? AND folio = ?', (fecha, folio))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else {}
+    except Exception as e:
+        print(f"Error obteniendo crédito punteado: {e}")
+        return {}
+
+
+def obtener_credito_eleventa(fecha: str, folio: int) -> Dict:
+    """Obtiene un crédito Eleventa específico por fecha y folio."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM creditos_eleventa WHERE fecha = ? AND folio = ?', (fecha, folio))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else {}
+    except Exception as e:
+        print(f"Error obteniendo crédito Eleventa: {e}")
+        return {}
 
 
 def obtener_creditos_punteados_por_estado(estado: str = None) -> List[Dict]:

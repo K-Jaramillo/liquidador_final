@@ -123,6 +123,87 @@ def limpiar_asignaciones_dia(fecha):
 # ===========================================================================
 #  DATASTORE  –  Modelo de datos centralizado (única fuente de verdad)
 # ===========================================================================
+# WIDGET TOGGLE SWITCH PERSONALIZADO
+# ===========================================================================
+class ToggleSwitch(tk.Frame):
+    """
+    Toggle switch visual estilo iOS/Material Design compacto.
+    Usa Frame + Canvas para manejar mejor el fondo con ttk.
+    """
+    def __init__(self, parent, variable=None, command=None, width=36, height=18,
+                 bg_off='#bdbdbd', bg_on='#4caf50', **kwargs):
+        # Eliminar opciones que pueden causar problemas
+        kwargs.pop('bg', None)
+        kwargs.pop('background', None)
+        
+        super().__init__(parent, **kwargs)
+        
+        self.canvas = tk.Canvas(self, width=width, height=height, 
+                               highlightthickness=0, bd=0)
+        self.canvas.pack()
+        
+        self.w = width
+        self.h = height
+        self.bg_off = bg_off
+        self.bg_on = bg_on
+        self.variable = variable
+        self.command = command
+        self.pad = 2
+        self.knob_r = (height - 2 * self.pad) // 2
+        
+        self.is_on = variable.get() if variable else False
+        self._draw()
+        self.canvas.bind("<Button-1>", self._toggle)
+        
+        if self.variable:
+            self.variable.trace_add('write', self._on_var_change)
+    
+    def _draw(self):
+        """Dibuja el switch."""
+        self.canvas.delete("all")
+        
+        bg = self.bg_on if self.is_on else self.bg_off
+        r = self.h // 2
+        
+        # Píldora de fondo
+        self.canvas.create_arc(0, 0, self.h, self.h, start=90, extent=180, fill=bg, outline=bg)
+        self.canvas.create_arc(self.w - self.h, 0, self.w, self.h, start=-90, extent=180, fill=bg, outline=bg)
+        self.canvas.create_rectangle(r, 0, self.w - r, self.h, fill=bg, outline=bg)
+        
+        # Knob (círculo blanco)
+        cx = (self.w - self.pad - self.knob_r) if self.is_on else (self.pad + self.knob_r)
+        cy = self.h // 2
+        
+        # Knob blanco
+        self.canvas.create_oval(cx - self.knob_r, cy - self.knob_r,
+                               cx + self.knob_r, cy + self.knob_r,
+                               fill='white', outline='#cccccc', width=1)
+    
+    def _toggle(self, event=None):
+        self.is_on = not self.is_on
+        if self.variable:
+            self.variable.set(self.is_on)
+        self._draw()
+        if self.command:
+            self.command()
+    
+    def _on_var_change(self, *args):
+        new_val = self.variable.get()
+        if new_val != self.is_on:
+            self.is_on = new_val
+            self._draw()
+    
+    def set(self, value):
+        self.is_on = bool(value)
+        if self.variable:
+            self.variable.set(self.is_on)
+        self._draw()
+    
+    def get(self):
+        return self.is_on
+
+
+# ===========================================================================
 class DataStore:
     """
     Mantiene el estado global de la aplicación.
@@ -1175,7 +1256,7 @@ class LiquidadorRepartidores:
         entry_fdb = ttk.Entry(fila1, textvariable=self.ruta_fdb_var, width=50)
         entry_fdb.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
-        ttk.Button(fila1, text="Examinar...", command=self._seleccionar_archivo_fdb, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(fila1, text="📂 Examinar", command=self._seleccionar_archivo_fdb, width=12).pack(side=tk.LEFT, padx=2)
         ttk.Button(fila1, text="🔗 Verificar", command=self._verificar_conexion_bd, width=10).pack(side=tk.LEFT, padx=2)
         
         # Indicador de estado
@@ -1185,17 +1266,18 @@ class LiquidadorRepartidores:
         # Separador
         ttk.Separator(fila1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         
-        # Switch de tema claro/oscuro
+        # Switch de tema claro/oscuro con toggle visual
         self.tema_var = tk.BooleanVar(value=True)  # True = oscuro
-        ttk.Label(fila1, text="☀️").pack(side=tk.LEFT)
-        self.switch_tema = ttk.Checkbutton(
+        ttk.Label(fila1, text="☀️").pack(side=tk.LEFT, padx=(0, 3))
+        self.switch_tema = ToggleSwitch(
             fila1, 
             variable=self.tema_var,
             command=self._toggle_tema,
-            style="Switch.TCheckbutton"
+            width=36, height=18,
+            bg_off='#bdbdbd', bg_on='#4caf50'
         )
         self.switch_tema.pack(side=tk.LEFT, padx=2)
-        ttk.Label(fila1, text="🌙").pack(side=tk.LEFT)
+        ttk.Label(fila1, text="🌙").pack(side=tk.LEFT, padx=(3, 0))
         
         # ═══════════════════════════════════════════════════════════════
         # FILA 2: Filtros globales (Fecha, Repartidor, Estado)
@@ -1318,9 +1400,9 @@ class LiquidadorRepartidores:
             self.notebook.add(self.tab_anotaciones, text="  📝 Anotaciones  ")
             self._crear_tab_anotaciones()
 
-        # Pestaña 7 – Créditos (Punteados + Eleventa)
+        # Pestaña 7 – Créditos + Novedades
         self.tab_creditos_punteados = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_creditos_punteados, text="  💳 Créditos  ")
+        self.notebook.add(self.tab_creditos_punteados, text="  💳 Créditos + Novedades  ")
         self._crear_tab_creditos_punteados()
 
     # ------------------------------------------------------------------
@@ -1345,7 +1427,7 @@ class LiquidadorRepartidores:
         
         # Filtro de Estado interno
         ttk.Label(toolbar, text="Estado:", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(5, 2))
-        self.filtro_estado_creditos_var = tk.StringVar(value="Todos")
+        self.filtro_estado_creditos_var = tk.StringVar(value="PENDIENTE")
         self.combo_filtro_estado_creditos = ttk.Combobox(
             toolbar, 
             textvariable=self.filtro_estado_creditos_var,
@@ -1407,9 +1489,9 @@ class LiquidadorRepartidores:
         frame_lista.columnconfigure(0, weight=1)
         frame_lista.rowconfigure(0, weight=1)
         
-        # Treeview unificado
-        columnas = ("fecha", "folio", "cliente", "valor_factura", "valor_credito", "abono", "saldo", "estado", "origen")
-        self.tree_creditos = ttk.Treeview(frame_lista, columns=columnas, show="headings", height=20)
+        # Treeview unificado (orden: fecha, folio, cliente, valores, estado, repartidor, origen)
+        columnas = ("fecha", "folio", "cliente", "valor_factura", "valor_credito", "abono", "saldo", "estado", "repartidor", "origen")
+        self.tree_creditos = ttk.Treeview(frame_lista, columns=columnas, show="headings", height=15)
         
         self.tree_creditos.heading("fecha", text="Fecha", anchor=tk.CENTER)
         self.tree_creditos.heading("folio", text="Folio", anchor=tk.CENTER)
@@ -1419,17 +1501,19 @@ class LiquidadorRepartidores:
         self.tree_creditos.heading("abono", text="Abono", anchor=tk.E)
         self.tree_creditos.heading("saldo", text="Saldo", anchor=tk.E)
         self.tree_creditos.heading("estado", text="Estado", anchor=tk.CENTER)
+        self.tree_creditos.heading("repartidor", text="Repartidor", anchor=tk.W)
         self.tree_creditos.heading("origen", text="Origen", anchor=tk.CENTER)
         
         self.tree_creditos.column("fecha", width=90, anchor=tk.CENTER)
         self.tree_creditos.column("folio", width=70, anchor=tk.CENTER)
-        self.tree_creditos.column("cliente", width=200, anchor=tk.W)
+        self.tree_creditos.column("cliente", width=180, anchor=tk.W)
         self.tree_creditos.column("valor_factura", width=100, anchor=tk.E)
         self.tree_creditos.column("valor_credito", width=100, anchor=tk.E)
         self.tree_creditos.column("abono", width=90, anchor=tk.E)
         self.tree_creditos.column("saldo", width=100, anchor=tk.E)
-        self.tree_creditos.column("estado", width=100, anchor=tk.CENTER)
-        self.tree_creditos.column("origen", width=100, anchor=tk.CENTER)
+        self.tree_creditos.column("estado", width=90, anchor=tk.CENTER)
+        self.tree_creditos.column("repartidor", width=120, anchor=tk.W)
+        self.tree_creditos.column("origen", width=90, anchor=tk.CENTER)
         
         scrolly = ttk.Scrollbar(frame_lista, orient=tk.VERTICAL, command=self.tree_creditos.yview)
         scrollx = ttk.Scrollbar(frame_lista, orient=tk.HORIZONTAL, command=self.tree_creditos.xview)
@@ -1441,6 +1525,8 @@ class LiquidadorRepartidores:
         
         # Clic simple para editar estado/abono in-place
         self.tree_creditos.bind("<Button-1>", self._on_clic_credito)
+        # Doble clic para ver/editar observaciones
+        self.tree_creditos.bind("<Double-1>", self._on_doble_clic_credito)
         
         # Tags para estados - colores más suaves y profesionales
         self.tree_creditos.tag_configure("pagado", background="#e8f5e9", foreground="#2e7d32")    # Verde suave
@@ -1474,15 +1560,16 @@ class LiquidadorRepartidores:
             return
         
         col_idx = int(column.replace('#', '')) - 1
-        columnas = ("fecha", "folio", "cliente", "valor_factura", "valor_credito", "abono", "saldo", "estado", "origen")
+        # Orden: fecha, folio, cliente, valor_factura, valor_credito, abono, saldo, estado, repartidor, origen
+        columnas = ("fecha", "folio", "cliente", "valor_factura", "valor_credito", "abono", "saldo", "estado", "repartidor", "origen")
         
         if col_idx < 0 or col_idx >= len(columnas):
             return
         
         col_name = columnas[col_idx]
         
-        # Solo editar columnas abono y estado
-        if col_name not in ("abono", "estado"):
+        # Solo editar columnas abono, estado y repartidor
+        if col_name not in ("abono", "estado", "repartidor"):
             # Seleccionar la fila normalmente
             self.tree_creditos.selection_set(item_id)
             return
@@ -1490,7 +1577,7 @@ class LiquidadorRepartidores:
         values = self.tree_creditos.item(item_id, 'values')
         fecha = values[0]
         folio = int(values[1])
-        origen = values[8]  # ELEVENTA o PUNTEADO
+        origen = values[9]  # ELEVENTA o PUNTEADO (índice 9)
         tipo = 'eleventa' if origen == 'ELEVENTA' else 'punteado'
         
         # Obtener coordenadas de la celda
@@ -1504,6 +1591,8 @@ class LiquidadorRepartidores:
             self._crear_entry_abono(item_id, tipo, fecha, folio, x, y, width, height, values)
         elif col_name == "estado":
             self._crear_combo_estado(item_id, tipo, fecha, folio, x, y, width, height, values)
+        elif col_name == "repartidor":
+            self._crear_combo_repartidor_credito(item_id, tipo, fecha, folio, x, y, width, height, values)
     
     def _cerrar_edicion_credito(self, event=None):
         """Cierra el widget de edición in-place."""
@@ -1522,6 +1611,7 @@ class LiquidadorRepartidores:
     
     def _crear_entry_abono(self, item_id, tipo, fecha, folio, x, y, width, height, values):
         """Crea Entry in-place con botón para editar abono."""
+        # Índices: 0=fecha, 1=folio, 2=cliente, 3=valor_factura, 4=valor_credito, 5=abono, 6=saldo, 7=estado, 8=repartidor, 9=origen
         abono_actual = values[5].replace('$', '').replace(',', '') if values[5] else '0'
         valor_credito_str = values[4].replace('$', '').replace(',', '') if values[4] else '0'
         cliente = values[2] if len(values) > 2 else ''
@@ -1607,6 +1697,7 @@ class LiquidadorRepartidores:
     
     def _crear_combo_estado(self, item_id, tipo, fecha, folio, x, y, width, height, values):
         """Crea Combobox in-place para seleccionar estado."""
+        # Índice 7 = estado
         estado_actual = values[7] if len(values) > 7 else 'PENDIENTE'
         
         # Frame contenedor
@@ -1649,6 +1740,145 @@ class LiquidadorRepartidores:
         combo.bind("<<ComboboxSelected>>", guardar)
         combo.bind("<Escape>", cancelar)
         combo.bind("<FocusOut>", cancelar)
+    
+    def _crear_combo_repartidor_credito(self, item_id, tipo, fecha, folio, x, y, width, height, values):
+        """Crea Combobox in-place para seleccionar repartidor del crédito."""
+        # Índice 8 = repartidor
+        repartidor_actual = values[8] if len(values) > 8 else ''
+        
+        # Obtener lista de repartidores
+        repartidores = [""] + list(self.ds.repartidores.keys())
+        
+        # Frame contenedor
+        frame = tk.Frame(self.tree_creditos, bg='white', highlightbackground='#1976d2', highlightthickness=2)
+        frame.place(x=x-5, y=y, width=width+50, height=height+4)
+        
+        self.credito_edit_frame = frame
+        
+        combo = ttk.Combobox(frame, values=repartidores, font=("Segoe UI", 9), width=15)
+        combo.set(repartidor_actual)
+        combo.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        combo.focus_set()
+        
+        self.credito_edit_widget = combo
+        
+        def guardar(event=None):
+            nuevo_repartidor = combo.get()
+            # Guardar en SQLite
+            if tipo == 'punteado':
+                resultado = db_local.actualizar_repartidor_credito_punteado(fecha, folio, nuevo_repartidor)
+            else:
+                resultado = db_local.actualizar_repartidor_credito_eleventa(fecha, folio, nuevo_repartidor)
+            
+            if resultado:
+                print(f"✅ Repartidor actualizado: Folio {folio} | Repartidor: {nuevo_repartidor}")
+            
+            self._cerrar_edicion_credito()
+            self._refrescar_creditos_tab()
+        
+        def cancelar(event=None):
+            self._cerrar_edicion_credito()
+        
+        # Botón Guardar
+        btn_guardar = tk.Button(frame, text="✓", font=("Segoe UI", 9, "bold"), 
+                                bg='#4caf50', fg='white', bd=0, width=3,
+                                command=guardar, cursor='hand2')
+        btn_guardar.pack(side=tk.LEFT, padx=1)
+        
+        combo.bind("<Return>", guardar)
+        combo.bind("<Escape>", cancelar)
+    
+    def _on_doble_clic_credito(self, event):
+        """Maneja doble clic para ver/editar observaciones del crédito."""
+        item_id = self.tree_creditos.identify_row(event.y)
+        if not item_id:
+            return
+        
+        values = self.tree_creditos.item(item_id, 'values')
+        # Índices: 0=fecha, 1=folio, 2=cliente, 3=valor_factura, 4=valor_credito, 5=abono, 6=saldo, 7=estado, 8=repartidor, 9=origen
+        fecha = values[0]
+        folio = int(values[1])
+        cliente = values[2]
+        origen = values[9]  # ELEVENTA o PUNTEADO
+        tipo = 'eleventa' if origen == 'ELEVENTA' else 'punteado'
+        
+        # Obtener observaciones actuales
+        if tipo == 'punteado':
+            credito = db_local.obtener_credito_punteado(fecha, folio)
+        else:
+            credito = db_local.obtener_credito_eleventa(fecha, folio)
+        
+        obs_actual = credito.get('observaciones', '') if credito else ''
+        
+        # Crear diálogo para editar observaciones
+        dialog = tk.Toplevel(self.ventana)
+        dialog.title(f"Observaciones - Folio {folio}")
+        dialog.geometry("500x320")
+        dialog.transient(self.ventana)
+        dialog.grab_set()
+        dialog.configure(bg='#f5f5f5')
+        dialog.resizable(False, False)
+        
+        # Centrar
+        dialog.update_idletasks()
+        x = self.ventana.winfo_x() + (self.ventana.winfo_width() // 2) - 250
+        y = self.ventana.winfo_y() + (self.ventana.winfo_height() // 2) - 160
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Header con info del crédito
+        frame_header = tk.Frame(dialog, bg='#1976d2', height=60)
+        frame_header.pack(fill=tk.X)
+        frame_header.pack_propagate(False)
+        
+        tk.Label(frame_header, text=f"Folio: {folio}", font=("Segoe UI", 14, "bold"),
+                 bg='#1976d2', fg='white').pack(anchor='w', padx=15, pady=(10, 0))
+        tk.Label(frame_header, text=f"{cliente} | {fecha} | {origen}",
+                 font=("Segoe UI", 9), bg='#1976d2', fg='#bbdefb').pack(anchor='w', padx=15)
+        
+        # Contenido
+        frame_content = tk.Frame(dialog, bg='#f5f5f5')
+        frame_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
+        
+        tk.Label(frame_content, text="Observaciones / Novedades:", font=("Segoe UI", 10, "bold"),
+                 bg='#f5f5f5', fg='#333333', anchor='w').pack(fill=tk.X, pady=(0, 5))
+        
+        # Frame para el texto con borde visual
+        frame_text = tk.Frame(frame_content, bg='#cccccc', bd=1, relief=tk.SOLID)
+        frame_text.pack(fill=tk.BOTH, expand=True)
+        
+        text_obs = tk.Text(frame_text, height=8, font=("Segoe UI", 10), wrap=tk.WORD,
+                           bg='white', fg='#333333', insertbackground='#333333',
+                           relief=tk.FLAT, padx=10, pady=10)
+        text_obs.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        text_obs.insert('1.0', obs_actual)
+        text_obs.focus_set()
+        
+        # Botones al fondo
+        frame_btns = tk.Frame(dialog, bg='#f5f5f5')
+        frame_btns.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+        def guardar():
+            nueva_obs = text_obs.get('1.0', tk.END).strip()
+            if tipo == 'punteado':
+                db_local.actualizar_observaciones_credito_punteado(fecha, folio, nueva_obs)
+            else:
+                db_local.actualizar_observaciones_credito_eleventa(fecha, folio, nueva_obs)
+            print(f"Observaciones actualizadas: Folio {folio}")
+            dialog.destroy()
+        
+        btn_guardar = tk.Button(frame_btns, text="Guardar", font=("Segoe UI", 10, "bold"),
+                  bg='#4caf50', fg='white', width=12, cursor='hand2', relief=tk.FLAT,
+                  activebackground='#388e3c', activeforeground='white',
+                  command=guardar)
+        btn_guardar.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        btn_cancelar = tk.Button(frame_btns, text="Cancelar", font=("Segoe UI", 10),
+                  bg='#9e9e9e', fg='white', width=12, cursor='hand2', relief=tk.FLAT,
+                  activebackground='#757575', activeforeground='white',
+                  command=dialog.destroy)
+        btn_cancelar.pack(side=tk.RIGHT)
+        
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
     
     def _saldar_creditos_anteriores(self):
         """Salda automáticamente todos los créditos anteriores al 01 de enero de 2026."""
@@ -1807,6 +2037,9 @@ class LiquidadorRepartidores:
         filtro_estado = self.filtro_estado_creditos_var.get() if hasattr(self, 'filtro_estado_creditos_var') else "Todos"
         filtro_origen = self.filtro_origen_creditos_var.get() if hasattr(self, 'filtro_origen_creditos_var') else "Todos"
         
+        # Cargar asignaciones para obtener repartidores
+        asignaciones = cargar_asignaciones()
+        
         # Configurar tags para colores según estado - colores suaves y profesionales
         self.tree_creditos.tag_configure("pagado", background="#e8f5e9", foreground="#2e7d32")    # Verde suave
         self.tree_creditos.tag_configure("pendiente", background="#fff8e1", foreground="#f57c00") # Naranja/ámbar
@@ -1821,15 +2054,26 @@ class LiquidadorRepartidores:
         if filtro_origen in ("Todos", "PUNTEADO"):
             creditos_punt = db_local.obtener_todos_creditos_punteados()
             for cp in creditos_punt:
+                fecha = cp.get('fecha', '')
+                folio = cp.get('folio', '')
+                # Buscar repartidor en asignaciones
+                key = f"{fecha}_{folio}"
+                repartidor = asignaciones.get(key, '') or cp.get('repartidor', '') or ''
+                
+                # Obtener cliente (mostrar tal cual viene de la BD)
+                cliente = cp.get('cliente', '') or 'MOSTRADOR'
+                
                 creditos_unificados.append({
-                    'fecha': cp.get('fecha', ''),
-                    'folio': cp.get('folio', ''),
-                    'cliente': cp.get('cliente', ''),
+                    'fecha': fecha,
+                    'folio': folio,
+                    'cliente': cliente,
+                    'repartidor': repartidor,
                     'valor_factura': cp.get('subtotal', 0) or 0,
                     'valor_credito': cp.get('valor_credito', 0) or cp.get('subtotal', 0) or 0,
                     'abono': cp.get('abono', 0) or 0,
                     'estado': cp.get('estado', 'PENDIENTE') or 'PENDIENTE',
-                    'origen': 'PUNTEADO'
+                    'origen': 'PUNTEADO',
+                    'observaciones': cp.get('observaciones', '') or ''
                 })
         
         # ═══════════════════════════════════════════════════════════════
@@ -1838,9 +2082,15 @@ class LiquidadorRepartidores:
         if filtro_origen in ("Todos", "ELEVENTA"):
             creditos_elev = db_local.obtener_todos_creditos_eleventa()
             for ce in creditos_elev:
+                fecha = ce.get('fecha', '')
+                folio = ce.get('folio', '')
                 valor_factura = ce.get('subtotal', 0) or 0
                 valor_credito = ce.get('total_credito', 0) or 0
                 estado_guardado = ce.get('estado', 'PENDIENTE') or 'PENDIENTE'
+                
+                # Buscar repartidor en asignaciones
+                key = f"{fecha}_{folio}"
+                repartidor = asignaciones.get(key, '') or ce.get('repartidor', '') or ''
                 
                 # Detectar facturas CANCELADAS: valor_factura=0 pero valor_credito>0
                 if valor_factura == 0 and valor_credito > 0 and estado_guardado not in ('PAGADO',):
@@ -1848,15 +2098,20 @@ class LiquidadorRepartidores:
                 else:
                     estado = estado_guardado
                 
+                # Obtener cliente (mostrar tal cual viene de la BD)
+                cliente = ce.get('cliente', '') or 'MOSTRADOR'
+                
                 creditos_unificados.append({
-                    'fecha': ce.get('fecha', ''),
-                    'folio': ce.get('folio', ''),
-                    'cliente': ce.get('cliente', ''),
+                    'fecha': fecha,
+                    'folio': folio,
+                    'cliente': cliente,
+                    'repartidor': repartidor,
                     'valor_factura': valor_factura,
                     'valor_credito': valor_credito,
                     'abono': ce.get('abono', 0) or 0,
                     'estado': estado,
-                    'origen': 'ELEVENTA'
+                    'origen': 'ELEVENTA',
+                    'observaciones': ce.get('observaciones', '') or ''
                 })
         
         # Ordenar por fecha descendente
@@ -1871,6 +2126,7 @@ class LiquidadorRepartidores:
             fecha = c['fecha']
             folio = c['folio']
             cliente = c['cliente']
+            repartidor = c['repartidor']
             valor_factura = c['valor_factura']
             valor_credito = c['valor_credito']
             abono = c['abono']
@@ -1899,6 +2155,7 @@ class LiquidadorRepartidores:
             else:
                 tag = "pendiente"
             saldo = valor_credito - abono
+            # Orden: fecha, folio, cliente, valor_factura, valor_credito, abono, saldo, estado, repartidor, origen
             self.tree_creditos.insert("", tk.END, values=(
                 fecha,
                 folio,
@@ -1908,6 +2165,7 @@ class LiquidadorRepartidores:
                 f"${abono:,.2f}",
                 f"${saldo:,.2f}",
                 estado,
+                repartidor,
                 origen
             ), tags=(tag,))
         
@@ -2342,7 +2600,7 @@ class LiquidadorRepartidores:
         # Indicador 4: Devoluciones
         ind4 = ttk.Frame(corte_content)
         ind4.pack(side=tk.LEFT, padx=(0, 40))
-        ttk.Label(ind4, text="↩️", font=("Segoe UI", 18)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(ind4, text="🔄", font=("Segoe UI", 18)).pack(side=tk.LEFT, padx=(0, 8))
         ind4_text = ttk.Frame(ind4)
         ind4_text.pack(side=tk.LEFT)
         ttk.Label(ind4_text, text="DEVOLUCIONES", font=("Segoe UI", 8), 
@@ -2354,7 +2612,7 @@ class LiquidadorRepartidores:
         # Indicador 5: Turno actual
         ind5 = ttk.Frame(corte_content)
         ind5.pack(side=tk.LEFT)
-        ttk.Label(ind5, text="🔄", font=("Segoe UI", 18)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(ind5, text="#", font=("Segoe UI", 22, "bold"), foreground="#fdd835").pack(side=tk.LEFT, padx=(0, 8))
         ind5_text = ttk.Frame(ind5)
         ind5_text.pack(side=tk.LEFT)
         ttk.Label(ind5_text, text="TURNO", font=("Segoe UI", 8), 
@@ -6293,10 +6551,12 @@ ORDER BY V.FOLIO, DA.ID;
 
         # Fila 3: Monto
         ttk.Label(frame_entrada, text="Monto:").grid(row=3, column=0, sticky=tk.W, pady=(0, 4))
+        frame_monto_gasto = ttk.Frame(frame_entrada)
+        frame_monto_gasto.grid(row=3, column=1, sticky=tk.W, padx=(4, 0), pady=(0, 4))
+        ttk.Label(frame_monto_gasto, text="$").pack(side=tk.LEFT)
         self.gasto_monto_var = tk.StringVar(value="0.00")
-        ttk.Entry(frame_entrada, textvariable=self.gasto_monto_var,
-                  width=14, justify=tk.RIGHT).grid(row=3, column=1, sticky=tk.W, padx=(4, 0), pady=(0, 4))
-        ttk.Label(frame_entrada, text="$").grid(row=3, column=2, sticky=tk.W, padx=(2, 16), pady=(0, 4))
+        ttk.Entry(frame_monto_gasto, textvariable=self.gasto_monto_var,
+                  width=12, justify=tk.RIGHT).pack(side=tk.LEFT)
         
         # Fila 4: Observaciones
         ttk.Label(frame_entrada, text="Observaciones:").grid(row=4, column=0, sticky=tk.W, pady=(0, 4))
