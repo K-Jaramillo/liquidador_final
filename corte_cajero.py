@@ -900,7 +900,10 @@ class CorteCajeroManager:
         WHERE CAST(INICIO_EN AS DATE) = '{fecha}'
         ORDER BY ID;
         """
+        print(f"[CorteCajeroManager] SQL turnos: {sql}")
         resultado, error = self._ejecutar_sql(sql)
+        print(f"[CorteCajeroManager] Resultado: {resultado[:200] if resultado else 'vacío'}")
+        print(f"[CorteCajeroManager] Error: {error}")
         if error:
             return []
         
@@ -1468,6 +1471,164 @@ class CorteCajeroManager:
             dinero_en_caja=dinero_total,
             ventas=ventas_total,
             ganancia=ganancia_total
+        )
+
+    def obtener_corte_por_fecha_ventas(self, fecha: str) -> Optional[CorteCajero]:
+        """
+        Obtiene el corte de caja basándose en la FECHA DE LAS VENTAS (CREADO_EN),
+        no en la fecha de inicio del turno. Esto resuelve el problema cuando un
+        cajero deja el turno abierto y vende en días posteriores.
+        
+        Args:
+            fecha: Fecha en formato 'YYYY-MM-DD'
+            
+        Returns:
+            Objeto CorteCajero con los totales de ventas del día
+        """
+        print(f"[Corte por Fecha Ventas] Consultando ventas para fecha: {fecha}")
+        
+        # Consulta principal: Obtener totales de ventas por fecha de venta
+        # ESTA_CANCELADO es char('t'/'f') en Firebird, no numérico
+        sql = f"""
+        SELECT 
+            COALESCE(SUM(CASE WHEN COALESCE(V.ESTA_CANCELADO, 'f') <> 't' THEN V.SUBTOTAL ELSE 0 END), 0) AS TOTAL_VENTAS,
+            COALESCE(SUM(CASE WHEN COALESCE(V.ESTA_CANCELADO, 'f') <> 't' THEN COALESCE(V.TOTAL_CREDITO, 0) ELSE 0 END), 0) AS VENTAS_CREDITO,
+            COALESCE(SUM(CASE WHEN COALESCE(V.ESTA_CANCELADO, 'f') <> 't' AND COALESCE(V.TOTAL_CREDITO, 0) = 0 THEN V.SUBTOTAL ELSE 0 END), 0) AS VENTAS_EFECTIVO,
+            COUNT(CASE WHEN COALESCE(V.ESTA_CANCELADO, 'f') <> 't' THEN 1 END) AS NUM_VENTAS,
+            COUNT(CASE WHEN COALESCE(V.ESTA_CANCELADO, 'f') = 't' THEN 1 END) AS NUM_CANCELADAS
+        FROM VENTATICKETS V
+        WHERE CAST(V.CREADO_EN AS DATE) = '{fecha}';
+        """
+        
+        resultado, error = self._ejecutar_sql(sql)
+        print(f"[Corte por Fecha Ventas] Resultado SQL: {resultado[:300] if resultado else 'vacío'}")
+        
+        if error:
+            print(f"[Corte por Fecha Ventas] Error SQL: {error}")
+        
+        # Si no hay resultado Y hay error, retornar None
+        if not resultado and error:
+            return None
+        
+        # Parsear resultados
+        total_ventas = 0.0
+        ventas_credito = 0.0
+        ventas_efectivo = 0.0
+        
+        try:
+            lines = resultado.split('\n')
+            header_found = False
+            
+            for line in lines:
+                line_stripped = line.strip()
+                if not line_stripped or 'SQL>' in line_stripped:
+                    continue
+                if line_stripped.startswith('=') or line_stripped.startswith('-'):
+                    header_found = True
+                    continue
+                if 'TOTAL_VENTAS' in line_stripped:
+                    header_found = True
+                    continue
+                if header_found and line_stripped:
+                    partes = line_stripped.split()
+                    if len(partes) >= 3:
+                        def safe_float(val):
+                            if val in ('<null>', 'null', 'NULL', '<NULL>'):
+                                return 0.0
+                            try:
+                                return float(val.replace(',', ''))
+                            except:
+                                return 0.0
+                        
+                        total_ventas = safe_float(partes[0])
+                        ventas_credito = safe_float(partes[1])
+                        ventas_efectivo = safe_float(partes[2])
+                        print(f"[Corte por Fecha Ventas] Total: {total_ventas}, Crédito: {ventas_credito}, Efectivo: {ventas_efectivo}")
+                    break
+        except Exception as e:
+            print(f"[Corte por Fecha Ventas] Error parseando: {e}")
+        
+        # Consulta de devoluciones por fecha
+        sql_devs = f"""
+        SELECT 
+            COALESCE(SUM(D.TOTAL_DEVUELTO), 0) AS TOTAL_DEVOLUCIONES,
+            COALESCE(SUM(CASE 
+                WHEN COALESCE(V.TOTAL_CREDITO, 0) = 0 THEN D.TOTAL_DEVUELTO 
+                ELSE 0 
+            END), 0) AS DEV_EFECTIVO,
+            COALESCE(SUM(CASE 
+                WHEN COALESCE(V.TOTAL_CREDITO, 0) > 0 THEN D.TOTAL_DEVUELTO 
+                ELSE 0 
+            END), 0) AS DEV_CREDITO
+        FROM DEVOLUCIONES D
+        LEFT JOIN VENTATICKETS V ON D.TICKET_ID = V.ID
+        WHERE CAST(D.DEVUELTO_EN AS DATE) = '{fecha}';
+        """
+        
+        res_devs, err_devs = self._ejecutar_sql(sql_devs)
+        
+        total_devoluciones = 0.0
+        dev_efectivo = 0.0
+        dev_credito = 0.0
+        
+        if not err_devs and res_devs:
+            try:
+                header_found = False
+                for line in res_devs.split('\n'):
+                    line_stripped = line.strip()
+                    if not line_stripped or 'SQL>' in line_stripped:
+                        continue
+                    if line_stripped.startswith('=') or line_stripped.startswith('-'):
+                        header_found = True
+                        continue
+                    if 'TOTAL_DEVOLUCIONES' in line_stripped:
+                        header_found = True
+                        continue
+                    if header_found and line_stripped:
+                        partes = line_stripped.split()
+                        if len(partes) >= 3:
+                            total_devoluciones = float(partes[0]) if partes[0] not in ('<null>', 'null') else 0.0
+                            dev_efectivo = float(partes[1]) if partes[1] not in ('<null>', 'null') else 0.0
+                            dev_credito = float(partes[2]) if partes[2] not in ('<null>', 'null') else 0.0
+                            print(f"[Corte por Fecha Ventas] Devoluciones: {total_devoluciones}, Dev Ef: {dev_efectivo}, Dev Cr: {dev_credito}")
+                        break
+            except Exception as e:
+                print(f"[Corte por Fecha Ventas] Error parseando devoluciones: {e}")
+        
+        # Crear objetos
+        dinero_en_caja = DineroEnCaja(
+            fondo_de_caja=0.0,  # No hay fondo porque no es por turno
+            ventas_en_efectivo=ventas_efectivo,
+            abonos_en_efectivo=0.0,  # TODO: Consultar abonos por fecha si es necesario
+            entradas=0.0,
+            salidas=0.0,
+            devoluciones_en_efectivo=dev_efectivo
+        )
+        
+        ventas = Ventas(
+            ventas_efectivo=ventas_efectivo,
+            ventas_tarjeta=0.0,  # TODO: Si hay campo de tarjeta separado
+            ventas_credito=ventas_credito,
+            ventas_vales=0.0,
+            devoluciones_ventas=total_devoluciones,
+            devoluciones_por_forma_pago={
+                'efectivo': dev_efectivo,
+                'credito': dev_credito,
+                'tarjeta': 0.0,
+                'vales': 0.0
+            }
+        )
+        
+        # Calcular ganancia aproximada (ventas netas)
+        ganancia = total_ventas - total_devoluciones
+        
+        return CorteCajero(
+            turno_id=0,  # No hay turno específico
+            fecha_inicio=datetime.strptime(fecha, '%Y-%m-%d'),
+            fecha_fin=datetime.strptime(fecha, '%Y-%m-%d'),
+            dinero_en_caja=dinero_en_caja,
+            ventas=ventas,
+            ganancia=ganancia
         )
 
 

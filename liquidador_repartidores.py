@@ -131,15 +131,19 @@ class ToggleSwitch(tk.Frame):
     Usa Frame + Canvas para manejar mejor el fondo con ttk.
     """
     def __init__(self, parent, variable=None, command=None, width=36, height=18,
-                 bg_off='#bdbdbd', bg_on='#4caf50', **kwargs):
+                 bg_off='#bdbdbd', bg_on='#4caf50', frame_bg=None, **kwargs):
         # Eliminar opciones que pueden causar problemas
         kwargs.pop('bg', None)
         kwargs.pop('background', None)
         
         super().__init__(parent, **kwargs)
         
+        # Configurar fondo del frame
+        self._frame_bg = frame_bg or self.cget('bg')
+        self.configure(bg=self._frame_bg)
+        
         self.canvas = tk.Canvas(self, width=width, height=height, 
-                               highlightthickness=0, bd=0)
+                               highlightthickness=0, bd=0, bg=self._frame_bg)
         self.canvas.pack()
         
         self.w = width
@@ -198,6 +202,12 @@ class ToggleSwitch(tk.Frame):
         if self.variable:
             self.variable.set(self.is_on)
         self._draw()
+    
+    def set_frame_bg(self, color):
+        """Actualiza el color de fondo del frame y canvas."""
+        self._frame_bg = color
+        self.configure(bg=color)
+        self.canvas.configure(bg=color)
     
     def get(self):
         return self.is_on
@@ -1269,12 +1279,14 @@ class LiquidadorRepartidores:
         # Switch de tema claro/oscuro con toggle visual
         self.tema_var = tk.BooleanVar(value=True)  # True = oscuro
         ttk.Label(fila1, text="☀️").pack(side=tk.LEFT, padx=(0, 3))
+        # frame_bg inicial: modo oscuro = '#1e1e1e', modo claro = '#f5f5f5'
         self.switch_tema = ToggleSwitch(
             fila1, 
             variable=self.tema_var,
             command=self._toggle_tema,
             width=36, height=18,
-            bg_off='#bdbdbd', bg_on='#4caf50'
+            bg_off='#bdbdbd', bg_on='#4caf50',
+            frame_bg='#1e1e1e'  # Fondo inicial modo oscuro
         )
         self.switch_tema.pack(side=tk.LEFT, padx=2)
         ttk.Label(fila1, text="🌙").pack(side=tk.LEFT, padx=(3, 0))
@@ -1420,11 +1432,6 @@ class LiquidadorRepartidores:
         toolbar = ttk.Frame(tab)
         toolbar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
         
-        ttk.Label(toolbar, text="📋 Gestión de Créditos", 
-                  font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=15)
-        
         # Filtro de Estado interno
         ttk.Label(toolbar, text="Estado:", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(5, 2))
         self.filtro_estado_creditos_var = tk.StringVar(value="PENDIENTE")
@@ -1444,12 +1451,25 @@ class LiquidadorRepartidores:
         self.combo_filtro_origen_creditos = ttk.Combobox(
             toolbar, 
             textvariable=self.filtro_origen_creditos_var,
-            values=["Todos", "ELEVENTA", "PUNTEADO"],
-            width=12,
+            values=["Todos", "ELEVENTA", "PUNTEADO", "NO_ENTREGADO"],
+            width=14,
             state="readonly"
         )
         self.combo_filtro_origen_creditos.pack(side=tk.LEFT, padx=5)
         self.combo_filtro_origen_creditos.bind("<<ComboboxSelected>>", lambda e: self._refrescar_creditos_tab())
+        
+        # Filtro de Tipo (CRÉDITO / NO ENTREGADO)
+        ttk.Label(toolbar, text="Tipo:", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(10, 2))
+        self.filtro_tipo_creditos_var = tk.StringVar(value="Todos")
+        self.combo_filtro_tipo_creditos = ttk.Combobox(
+            toolbar, 
+            textvariable=self.filtro_tipo_creditos_var,
+            values=["Todos", "CRÉDITO", "NO ENTREGADO"],
+            width=14,
+            state="readonly"
+        )
+        self.combo_filtro_tipo_creditos.pack(side=tk.LEFT, padx=5)
+        self.combo_filtro_tipo_creditos.bind("<<ComboboxSelected>>", lambda e: self._refrescar_creditos_tab())
         
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=15)
         
@@ -1489,10 +1509,11 @@ class LiquidadorRepartidores:
         frame_lista.columnconfigure(0, weight=1)
         frame_lista.rowconfigure(0, weight=1)
         
-        # Treeview unificado (orden: fecha, folio, cliente, valores, estado, repartidor, origen)
-        columnas = ("fecha", "folio", "cliente", "valor_factura", "valor_credito", "abono", "saldo", "estado", "repartidor", "origen")
+        # Treeview unificado (orden: tipo, fecha, folio, cliente, valores, estado, repartidor, origen)
+        columnas = ("tipo", "fecha", "folio", "cliente", "valor_factura", "valor_credito", "abono", "saldo", "estado", "repartidor", "origen")
         self.tree_creditos = ttk.Treeview(frame_lista, columns=columnas, show="headings", height=15)
         
+        self.tree_creditos.heading("tipo", text="Tipo", anchor=tk.CENTER)
         self.tree_creditos.heading("fecha", text="Fecha", anchor=tk.CENTER)
         self.tree_creditos.heading("folio", text="Folio", anchor=tk.CENTER)
         self.tree_creditos.heading("cliente", text="Cliente", anchor=tk.W)
@@ -1504,16 +1525,17 @@ class LiquidadorRepartidores:
         self.tree_creditos.heading("repartidor", text="Repartidor", anchor=tk.W)
         self.tree_creditos.heading("origen", text="Origen", anchor=tk.CENTER)
         
+        self.tree_creditos.column("tipo", width=100, anchor=tk.CENTER)
         self.tree_creditos.column("fecha", width=90, anchor=tk.CENTER)
         self.tree_creditos.column("folio", width=70, anchor=tk.CENTER)
-        self.tree_creditos.column("cliente", width=180, anchor=tk.W)
-        self.tree_creditos.column("valor_factura", width=100, anchor=tk.E)
-        self.tree_creditos.column("valor_credito", width=100, anchor=tk.E)
-        self.tree_creditos.column("abono", width=90, anchor=tk.E)
-        self.tree_creditos.column("saldo", width=100, anchor=tk.E)
-        self.tree_creditos.column("estado", width=90, anchor=tk.CENTER)
-        self.tree_creditos.column("repartidor", width=120, anchor=tk.W)
-        self.tree_creditos.column("origen", width=90, anchor=tk.CENTER)
+        self.tree_creditos.column("cliente", width=160, anchor=tk.W)
+        self.tree_creditos.column("valor_factura", width=95, anchor=tk.E)
+        self.tree_creditos.column("valor_credito", width=95, anchor=tk.E)
+        self.tree_creditos.column("abono", width=80, anchor=tk.E)
+        self.tree_creditos.column("saldo", width=90, anchor=tk.E)
+        self.tree_creditos.column("estado", width=85, anchor=tk.CENTER)
+        self.tree_creditos.column("repartidor", width=100, anchor=tk.W)
+        self.tree_creditos.column("origen", width=85, anchor=tk.CENTER)
         
         scrolly = ttk.Scrollbar(frame_lista, orient=tk.VERTICAL, command=self.tree_creditos.yview)
         scrollx = ttk.Scrollbar(frame_lista, orient=tk.HORIZONTAL, command=self.tree_creditos.xview)
@@ -1532,6 +1554,7 @@ class LiquidadorRepartidores:
         self.tree_creditos.tag_configure("pagado", background="#e8f5e9", foreground="#2e7d32")    # Verde suave
         self.tree_creditos.tag_configure("pendiente", background="#fff8e1", foreground="#f57c00") # Naranja/ámbar
         self.tree_creditos.tag_configure("cancelado", background="#fce4ec", foreground="#c2185b") # Rosa suave
+        self.tree_creditos.tag_configure("no_entregado", background="#e3f2fd", foreground="#1565c0") # Azul suave
         
         # Widget flotante para edición in-place
         self.credito_edit_widget = None
@@ -2044,6 +2067,10 @@ class LiquidadorRepartidores:
         self.tree_creditos.tag_configure("pagado", background="#e8f5e9", foreground="#2e7d32")    # Verde suave
         self.tree_creditos.tag_configure("pendiente", background="#fff8e1", foreground="#f57c00") # Naranja/ámbar
         self.tree_creditos.tag_configure("cancelado", background="#fce4ec", foreground="#c2185b") # Rosa suave
+        self.tree_creditos.tag_configure("no_entregado", background="#e3f2fd", foreground="#1565c0") # Azul suave
+        
+        # Obtener filtro de tipo si existe
+        filtro_tipo = self.filtro_tipo_creditos_var.get() if hasattr(self, 'filtro_tipo_creditos_var') else "Todos"
         
         # Lista unificada de todos los créditos
         creditos_unificados = []
@@ -2051,7 +2078,7 @@ class LiquidadorRepartidores:
         # ═══════════════════════════════════════════════════════════════
         # CRÉDITOS PUNTEADOS (Manuales)
         # ═══════════════════════════════════════════════════════════════
-        if filtro_origen in ("Todos", "PUNTEADO"):
+        if filtro_origen in ("Todos", "PUNTEADO") and filtro_tipo in ("Todos", "CRÉDITO"):
             creditos_punt = db_local.obtener_todos_creditos_punteados()
             for cp in creditos_punt:
                 fecha = cp.get('fecha', '')
@@ -2064,6 +2091,7 @@ class LiquidadorRepartidores:
                 cliente = cp.get('cliente', '') or 'MOSTRADOR'
                 
                 creditos_unificados.append({
+                    'tipo': 'CRÉDITO',
                     'fecha': fecha,
                     'folio': folio,
                     'cliente': cliente,
@@ -2079,7 +2107,7 @@ class LiquidadorRepartidores:
         # ═══════════════════════════════════════════════════════════════
         # CRÉDITOS ELEVENTA (Sistema)
         # ═══════════════════════════════════════════════════════════════
-        if filtro_origen in ("Todos", "ELEVENTA"):
+        if filtro_origen in ("Todos", "ELEVENTA") and filtro_tipo in ("Todos", "CRÉDITO"):
             creditos_elev = db_local.obtener_todos_creditos_eleventa()
             for ce in creditos_elev:
                 fecha = ce.get('fecha', '')
@@ -2102,6 +2130,7 @@ class LiquidadorRepartidores:
                 cliente = ce.get('cliente', '') or 'MOSTRADOR'
                 
                 creditos_unificados.append({
+                    'tipo': 'CRÉDITO',
                     'fecha': fecha,
                     'folio': folio,
                     'cliente': cliente,
@@ -2114,6 +2143,37 @@ class LiquidadorRepartidores:
                     'observaciones': ce.get('observaciones', '') or ''
                 })
         
+        # ═══════════════════════════════════════════════════════════════
+        # NO ENTREGADOS (desde liquidación)
+        # ═══════════════════════════════════════════════════════════════
+        if filtro_origen in ("Todos", "NO_ENTREGADO") and filtro_tipo in ("Todos", "NO ENTREGADO"):
+            # Obtener todos los no entregados de todas las fechas
+            no_entregados = db_local.obtener_todos_no_entregados()
+            for ne in no_entregados:
+                fecha = ne.get('fecha', '')
+                folio = ne.get('folio', '')
+                # Buscar repartidor en asignaciones
+                key = f"{fecha}_{folio}"
+                repartidor = asignaciones.get(key, '') or ne.get('repartidor', '') or ''
+                
+                # Obtener cliente
+                cliente = ne.get('cliente', '') or 'MOSTRADOR'
+                subtotal = ne.get('subtotal', 0) or 0
+                
+                creditos_unificados.append({
+                    'tipo': 'NO ENTREGADO',
+                    'fecha': fecha,
+                    'folio': folio,
+                    'cliente': cliente,
+                    'repartidor': repartidor,
+                    'valor_factura': subtotal,
+                    'valor_credito': subtotal,
+                    'abono': 0,
+                    'estado': 'PENDIENTE',
+                    'origen': 'NO_ENTREGADO',
+                    'observaciones': ne.get('observaciones', '') or ''
+                })
+        
         # Ordenar por fecha descendente
         creditos_unificados.sort(key=lambda x: x['fecha'], reverse=True)
         
@@ -2123,6 +2183,7 @@ class LiquidadorRepartidores:
         count_total = 0
         
         for c in creditos_unificados:
+            tipo = c.get('tipo', 'CRÉDITO')
             fecha = c['fecha']
             folio = c['folio']
             cliente = c['cliente']
@@ -2132,6 +2193,10 @@ class LiquidadorRepartidores:
             abono = c['abono']
             estado = c['estado']
             origen = c['origen']
+            
+            # Aplicar filtro de tipo
+            if filtro_tipo != "Todos" and tipo != filtro_tipo:
+                continue
             
             # Aplicar filtro de cliente
             if filtro_cliente:
@@ -2147,16 +2212,19 @@ class LiquidadorRepartidores:
                 total_pendiente += (valor_credito - abono)
             count_total += 1
             
-            # Asignar tag según estado
-            if estado == "PAGADO":
+            # Asignar tag según tipo y estado
+            if tipo == 'NO ENTREGADO':
+                tag = "no_entregado"
+            elif estado == "PAGADO":
                 tag = "pagado"
             elif estado == "CANCELADO":
                 tag = "cancelado"
             else:
                 tag = "pendiente"
             saldo = valor_credito - abono
-            # Orden: fecha, folio, cliente, valor_factura, valor_credito, abono, saldo, estado, repartidor, origen
+            # Orden: tipo, fecha, folio, cliente, valor_factura, valor_credito, abono, saldo, estado, repartidor, origen
             self.tree_creditos.insert("", tk.END, values=(
+                tipo,
                 fecha,
                 folio,
                 cliente,
@@ -2435,29 +2503,8 @@ class LiquidadorRepartidores:
         # Variable para sincronizar con fecha global
         self.fecha_asign_var = tk.StringVar(value=self.ds.fecha)
         
-        # Botón GUARDAR (deshabilitado por defecto)
-        self.btn_guardar_asign = ttk.Button(
-            frame_top, 
-            text="💾 GUARDAR",
-            command=self._guardar_cambios_repartidores,
-            state="disabled",
-            style="Success.TButton"
-        )
-        self.btn_guardar_asign.pack(side=tk.LEFT, padx=3)
-        
-        # Label indicador de cambios pendientes
-        self.lbl_cambios_pendientes = ttk.Label(
-            frame_top, 
-            text="",
-            foreground="#ff9800"
-        )
-        self.lbl_cambios_pendientes.pack(side=tk.LEFT, padx=5)
-        
         # Diccionario para rastrear cambios pendientes {folio: nuevo_repartidor}
         self._cambios_pendientes = {}
-        
-        # Separador visual
-        ttk.Separator(frame_top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         
         # Variable para compatibilidad con buscador (usa el global)
         self.buscar_asign_var = self.buscar_global_var
@@ -2620,6 +2667,32 @@ class LiquidadorRepartidores:
         self.lbl_corte_asign_turno = ttk.Label(ind5_text, text="#---", 
                  font=("Segoe UI", 14, "bold"), foreground="#fdd835")
         self.lbl_corte_asign_turno.pack(anchor=tk.W)
+        
+        # Botón GUARDAR y indicador de cambios (lado derecho, centrado verticalmente)
+        frame_guardar = ttk.Frame(corte_content)
+        frame_guardar.pack(side=tk.RIGHT, padx=(20, 0), fill=tk.Y)
+        
+        # Frame interno para centrar verticalmente
+        frame_guardar_inner = ttk.Frame(frame_guardar)
+        frame_guardar_inner.pack(expand=True)
+        
+        self.btn_guardar_asign = ttk.Button(
+            frame_guardar_inner, 
+            text="💾 GUARDAR",
+            command=self._guardar_cambios_repartidores,
+            state="disabled",
+            style="Success.TButton"
+        )
+        self.btn_guardar_asign.pack()
+        
+        # Label indicador de cambios pendientes
+        self.lbl_cambios_pendientes = ttk.Label(
+            frame_guardar_inner, 
+            text="",
+            foreground="#ff9800",
+            font=("Segoe UI", 8)
+        )
+        self.lbl_cambios_pendientes.pack(pady=(2, 0))
 
         # ============================================================
         # TABLA DE FACTURAS - Ocupa el espacio restante
@@ -3879,6 +3952,9 @@ ORDER BY V.FOLIO, DA.ID;
         self.modo_oscuro = self.tema_var.get()
         self._aplicar_tema()
         self._actualizar_tags_treeviews()
+        # Actualizar fondo del switch de tema
+        if hasattr(self, 'switch_tema'):
+            self.switch_tema.set_frame_bg(self.COLORS['bg_dark'])
     
     def _actualizar_tags_treeviews(self):
         """Actualiza los tags de colores en todos los Treeviews."""
@@ -4109,42 +4185,47 @@ ORDER BY V.FOLIO, DA.ID;
         self.lbl_total_creditos_punteados = ttk.Label(col3, text="$0", font=("Segoe UI", 9, "bold"), foreground="#e65100")
         self.lbl_total_creditos_punteados.grid(row=3, column=1, sticky=tk.E, padx=(10, 0))
         
-        # Separador
-        ttk.Separator(col3, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", pady=3)
+        # Total No Entregados
+        ttk.Label(col3, text="(-) No Entregados:", foreground="#00bcd4").grid(row=4, column=0, sticky=tk.W)
+        self.lbl_total_no_entregados = ttk.Label(col3, text="$0", font=("Segoe UI", 9, "bold"), foreground="#00bcd4")
+        self.lbl_total_no_entregados.grid(row=4, column=1, sticky=tk.E, padx=(10, 0))
         
-        # TOTAL EFECTIVO CAJA (Total Vendido - Total Descuentos - Créditos Punteados)
-        ttk.Label(col3, text="= TOTAL EFECTIVO CAJA:", font=("Segoe UI", 9, "bold")).grid(row=5, column=0, sticky=tk.W)
+        # Separador
+        ttk.Separator(col3, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", pady=3)
+        
+        # TOTAL EFECTIVO CAJA (Total Vendido - Total Descuentos - Créditos Punteados - No Entregados)
+        ttk.Label(col3, text="= TOTAL EFECTIVO CAJA:", font=("Segoe UI", 9, "bold")).grid(row=6, column=0, sticky=tk.W)
         self.lbl_total_efectivo_caja = ttk.Label(col3, text="$0", font=("Segoe UI", 11, "bold"), foreground="#1565c0")
-        self.lbl_total_efectivo_caja.grid(row=5, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_total_efectivo_caja.grid(row=6, column=1, sticky=tk.E, padx=(10, 0))
         
         # Separador
-        ttk.Separator(col3, orient="horizontal").grid(row=6, column=0, columnspan=2, sticky="ew", pady=3)
+        ttk.Separator(col3, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", pady=3)
         
         # Conteo de Dinero (copia del valor del módulo conteo de dinero) - DEBAJO DE TOTAL EFECTIVO CAJA
-        ttk.Label(col3, text="💵 Conteo de Dinero:", font=("Segoe UI", 9, "bold")).grid(row=7, column=0, sticky=tk.W)
+        ttk.Label(col3, text="💵 Conteo de Dinero:", font=("Segoe UI", 9, "bold")).grid(row=8, column=0, sticky=tk.W)
         self.lbl_conteo_dinero_cuadre = ttk.Label(col3, text="$0", font=("Segoe UI", 10, "bold"), foreground="#1565c0")
-        self.lbl_conteo_dinero_cuadre.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_conteo_dinero_cuadre.grid(row=8, column=1, sticky=tk.E, padx=(10, 0))
         
         # Diferencia Final (Conteo - Efectivo)
-        ttk.Label(col3, text="📊 Diferencia Final:", font=("Segoe UI", 9, "bold")).grid(row=8, column=0, sticky=tk.W)
+        ttk.Label(col3, text="📊 Diferencia Final:", font=("Segoe UI", 9, "bold")).grid(row=9, column=0, sticky=tk.W)
         self.lbl_diferencia_cuadre = ttk.Label(col3, text="$0", font=("Segoe UI", 10, "bold"), foreground="#9e9e9e")
-        self.lbl_diferencia_cuadre.grid(row=8, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_diferencia_cuadre.grid(row=9, column=1, sticky=tk.E, padx=(10, 0))
         
         # Separador
-        ttk.Separator(col3, orient="horizontal").grid(row=9, column=0, columnspan=2, sticky="ew", pady=3)
+        ttk.Separator(col3, orient="horizontal").grid(row=10, column=0, columnspan=2, sticky="ew", pady=3)
         
         # Total Facturadas a Crédito (desde Firebird)
-        ttk.Label(col3, text="Total a Crédito (FB):").grid(row=10, column=0, sticky=tk.W)
+        ttk.Label(col3, text="Total a Crédito (FB):").grid(row=11, column=0, sticky=tk.W)
         self.lbl_total_credito = ttk.Label(col3, text="$0", font=("Segoe UI", 9, "bold"), foreground="#f57c00")
-        self.lbl_total_credito.grid(row=10, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_total_credito.grid(row=11, column=1, sticky=tk.E, padx=(10, 0))
 
         # ═══════════════════════════════════════════════════════════════════════
-        # COLUMNA 3: RESULTADO FINAL
+        # COLUMNA 3: CUADRE REPARTIDOR
         # ═══════════════════════════════════════════════════════════════════════
         col4 = ttk.Frame(frame_fin)
         col4.grid(row=0, column=2, sticky="nsew")
         
-        ttk.Label(col4, text="💰 RESULTADO FINAL", font=("Segoe UI", 9, "bold"), 
+        ttk.Label(col4, text="💰 CUADRE REPARTIDOR", font=("Segoe UI", 9, "bold"), 
                   foreground="#2e7d32").grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
         
         # 1. Conteo de Dinero (del módulo conteo de dinero)
@@ -4163,22 +4244,27 @@ ORDER BY V.FOLIO, DA.ID;
         self.lbl_total_desc_resultado.grid(row=3, column=1, sticky=tk.E, padx=(10, 0))
         
         # 4. Créditos Punteados
-        ttk.Label(col4, text="(-) Créditos Punteados:", foreground="#9c27b0").grid(row=4, column=0, sticky=tk.W)
-        self.lbl_creditos_punt_resultado = ttk.Label(col4, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#9c27b0")
+        ttk.Label(col4, text="(-) Créditos Punteados:", foreground="#e65100").grid(row=4, column=0, sticky=tk.W)
+        self.lbl_creditos_punt_resultado = ttk.Label(col4, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#e65100")
         self.lbl_creditos_punt_resultado.grid(row=4, column=1, sticky=tk.E, padx=(10, 0))
         
+        # 5. No Entregados
+        ttk.Label(col4, text="(-) No Entregados:", foreground="#00bcd4").grid(row=5, column=0, sticky=tk.W)
+        self.lbl_no_entreg_resultado = ttk.Label(col4, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#00bcd4")
+        self.lbl_no_entreg_resultado.grid(row=5, column=1, sticky=tk.E, padx=(10, 0))
+        
         # Separador visual
-        ttk.Separator(col4, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", pady=5)
+        ttk.Separator(col4, orient="horizontal").grid(row=6, column=0, columnspan=2, sticky="ew", pady=5)
         
         # TOTAL DINERO A ENTREGAR (grande y destacado)
-        ttk.Label(col4, text="💵 TOTAL DINERO A ENTREGAR:", font=("Segoe UI", 10, "bold")).grid(row=6, column=0, sticky=tk.W)
+        ttk.Label(col4, text="💵 TOTAL DINERO A ENTREGAR:", font=("Segoe UI", 10, "bold")).grid(row=7, column=0, sticky=tk.W)
         self.lbl_neto = ttk.Label(col4, text="$0.00", font=("Segoe UI", 12, "bold"), foreground="#2e7d32")
-        self.lbl_neto.grid(row=6, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_neto.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
         
         # Diferencia con dinero entregado
-        ttk.Label(col4, text="Diferencia:", foreground="#9e9e9e").grid(row=7, column=0, sticky=tk.W)
+        ttk.Label(col4, text="Diferencia:", foreground="#9e9e9e").grid(row=8, column=0, sticky=tk.W)
         self.lbl_diferencia_global = ttk.Label(col4, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#9e9e9e")
-        self.lbl_diferencia_global.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_diferencia_global.grid(row=8, column=1, sticky=tk.E, padx=(10, 0))
 
         # ═══════════════════════════════════════════════════════════════════════
         # FILA 2: CORTE CAJERO (DATOS DE ELEVENTA)
@@ -4358,11 +4444,12 @@ ORDER BY V.FOLIO, DA.ID;
         
         self.tree_liq = ttk.Treeview(
             tree_liq_container,
-            columns=("credito", "folio", "cliente", "subtotal", "art_dev", "precio_dev", "cant_dev", "total_dev", "ajuste", "total_desp_aj", "repartidor", "estado"),
+            columns=("credito", "no_entreg", "folio", "cliente", "subtotal", "art_dev", "precio_dev", "cant_dev", "total_dev", "ajuste", "total_desp_aj", "repartidor", "estado"),
             selectmode="extended", height=3
         )
         self.tree_liq.column("#0",           width=0, stretch=tk.NO)
-        self.tree_liq.column("credito",      anchor=tk.CENTER, width=40)
+        self.tree_liq.column("credito",      anchor=tk.CENTER, width=50)
+        self.tree_liq.column("no_entreg",    anchor=tk.CENTER, width=55)
         self.tree_liq.column("folio",        anchor=tk.CENTER, width=60)
         self.tree_liq.column("cliente",      anchor=tk.W,      width=160)
         self.tree_liq.column("subtotal",     anchor=tk.E,      width=85)
@@ -4375,7 +4462,8 @@ ORDER BY V.FOLIO, DA.ID;
         self.tree_liq.column("repartidor",   anchor=tk.CENTER, width=80)
         self.tree_liq.column("estado",       anchor=tk.CENTER, width=75)
 
-        self.tree_liq.heading("credito",      text="💳")
+        self.tree_liq.heading("credito",      text="Crédito")
+        self.tree_liq.heading("no_entreg",    text="No Entreg")
         self.tree_liq.heading("folio",        text="📋 Folio")
         self.tree_liq.heading("cliente",      text="👤 Cliente")
         self.tree_liq.heading("subtotal",     text="💵 Subtotal")
@@ -4400,6 +4488,7 @@ ORDER BY V.FOLIO, DA.ID;
         self.tree_liq.tag_configure("cancelada_otro_dia", background="#880e4f", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
         self.tree_liq.tag_configure("credito",     background="#e65100", foreground="#ffffff", font=("Segoe UI", 9))
         self.tree_liq.tag_configure("credito_punteado", background="#0d47a1", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
+        self.tree_liq.tag_configure("no_entregado", background="#6a1b9a", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
 
         # Scrollbars
         scroll_liq_y = ttk.Scrollbar(tree_liq_container, orient=tk.VERTICAL, command=self.tree_liq.yview)
@@ -4624,7 +4713,7 @@ ORDER BY V.FOLIO, DA.ID;
         self.devoluciones_detalle = {}
 
     def _on_click_tree_liq(self, event):
-        """Maneja el click en la tabla de liquidación para toggle de crédito punteado."""
+        """Maneja el click en la tabla de liquidación para toggle de crédito punteado o no entregado."""
         # Identificar la región del click
         region = self.tree_liq.identify_region(event.x, event.y)
         if region != "cell":
@@ -4632,7 +4721,8 @@ ORDER BY V.FOLIO, DA.ID;
         
         # Identificar la columna
         column = self.tree_liq.identify_column(event.x)
-        if column != "#1":  # Primera columna visible (credito)
+        # #1 = credito, #2 = no_entregado
+        if column not in ("#1", "#2"):
             return
         
         # Obtener la fila
@@ -4642,18 +4732,18 @@ ORDER BY V.FOLIO, DA.ID;
         
         # Obtener valores de la fila
         values = self.tree_liq.item(row_id, "values")
-        if not values or len(values) < 4:
+        if not values or len(values) < 5:
             return
         
         # Verificar que tenga folio (no es fila de continuación)
-        folio_str = values[1]  # Columna folio (índice 1 porque credito es índice 0)
+        folio_str = values[2]  # Columna folio (índice 2: credito=0, no_entreg=1, folio=2)
         if not folio_str or folio_str == "":
             return
         
-        # Verificar si es cancelada - NO permitir puntear crédito
-        estado = values[11] if len(values) > 11 else ""
+        # Verificar si es cancelada - NO permitir
+        estado = values[12] if len(values) > 12 else ""
         if "CANCEL" in estado.upper():
-            messagebox.showwarning("No permitido", "No se puede puntear crédito en facturas canceladas.")
+            messagebox.showwarning("No permitido", "No se puede marcar facturas canceladas.")
             return
         
         try:
@@ -4662,26 +4752,38 @@ ORDER BY V.FOLIO, DA.ID;
             return
         
         # Obtener cliente y subtotal
-        cliente = values[2] if len(values) > 2 else ""
-        subtotal_str = values[3] if len(values) > 3 else "$0"
+        cliente = values[3] if len(values) > 3 else ""
+        subtotal_str = values[4] if len(values) > 4 else "$0"
         try:
             subtotal = float(subtotal_str.replace("$", "").replace(",", ""))
         except:
             subtotal = 0
         
         # Obtener repartidor
-        repartidor = values[10] if len(values) > 10 else ""
+        repartidor = values[11] if len(values) > 11 else ""
         
-        # Toggle crédito punteado en la BD
-        if USE_SQLITE and self.ds.fecha:
-            if db_local.es_credito_punteado(self.ds.fecha, folio):
-                # Eliminar de créditos punteados
-                db_local.eliminar_credito_punteado(self.ds.fecha, folio)
-            else:
-                # Agregar a créditos punteados
-                db_local.agregar_credito_punteado(
-                    self.ds.fecha, folio, cliente, subtotal, repartidor
-                )
+        if column == "#1":
+            # Toggle crédito punteado en la BD
+            if USE_SQLITE and self.ds.fecha:
+                if db_local.es_credito_punteado(self.ds.fecha, folio):
+                    # Eliminar de créditos punteados
+                    db_local.eliminar_credito_punteado(self.ds.fecha, folio)
+                else:
+                    # Agregar a créditos punteados
+                    db_local.agregar_credito_punteado(
+                        self.ds.fecha, folio, cliente, subtotal, repartidor
+                    )
+        elif column == "#2":
+            # Toggle no entregado en la BD
+            if USE_SQLITE and self.ds.fecha:
+                if db_local.es_no_entregado(self.ds.fecha, folio):
+                    # Eliminar de no entregados
+                    db_local.eliminar_no_entregado(self.ds.fecha, folio)
+                else:
+                    # Agregar a no entregados
+                    db_local.agregar_no_entregado(
+                        self.ds.fecha, folio, cliente, subtotal, repartidor
+                    )
         
         # Refrescar la tabla para mostrar el cambio
         self._refrescar_liquidacion()
@@ -4705,17 +4807,17 @@ ORDER BY V.FOLIO, DA.ID;
         
         # Obtener valores de la fila
         values = self.tree_liq.item(sel[0], "values")
-        if len(values) < 11:
+        if len(values) < 12:
             self._mostrar_detalle_devoluciones(event)
             return
         
-        folio = values[1]  # Columna folio (índice 1)
+        folio = values[2]  # Columna folio (índice 2: credito=0, no_entreg=1, folio=2)
         if not folio or folio == "":  # Fila de continuación
             self._mostrar_detalle_devoluciones(event)
             return
         
-        cliente = values[2]  # Cliente
-        repartidor = values[10]  # Repartidor actual
+        cliente = values[3]  # Cliente (índice 3)
+        repartidor = values[11]  # Repartidor actual (índice 11)
         
         # Actualizar panel de asignación
         self.lbl_folio_asignar.config(text=f"#{folio}")
@@ -4795,17 +4897,17 @@ ORDER BY V.FOLIO, DA.ID;
             self.lbl_dev_total_final.config(text="$0.00")
             return
         
-        # Obtener datos de la fila seleccionada (nuevas columnas - con credito en índice 0)
+        # Obtener datos de la fila seleccionada (columnas: credito=0, no_entreg=1, folio=2, ...)
         values = self.tree_liq.item(sel[0], "values")
-        if len(values) < 11:
+        if len(values) < 12:
             return
         
-        folio = values[1]  # Columna folio (índice 1 porque credito es índice 0)
+        folio = values[2]  # Columna folio (índice 2)
         if not folio:  # Fila de continuación de devolución
             return
             
-        subtotal = values[3]  # Columna subtotal (índice 3)
-        total_venta = values[9]  # Columna total después ajustes (índice 9)
+        subtotal = values[4]  # Columna subtotal (índice 4)
+        total_venta = values[10]  # Columna total después ajustes (índice 10)
         
         # Actualizar etiquetas
         self.lbl_dev_folio.config(text=f"#{folio}")
@@ -4908,6 +5010,7 @@ ORDER BY V.FOLIO, DA.ID;
         self.devoluciones_detalle = {}  # Reiniciar detalle de devoluciones
         ajustes_por_folio = {}  # Ajustes de precio por folio
         creditos_punteados_folios = set()  # Folios marcados como crédito punteado
+        no_entregados_folios = set()  # Folios marcados como no entregado
         if USE_SQLITE and self.ds.fecha:
             dev_parciales_por_folio = db_local.obtener_devoluciones_parciales_por_folio_fecha(self.ds.fecha)
             # Obtener detalle de artículos devueltos
@@ -4921,6 +5024,9 @@ ORDER BY V.FOLIO, DA.ID;
             # Obtener créditos punteados
             creditos_punteados = db_local.obtener_creditos_punteados_fecha(self.ds.fecha)
             creditos_punteados_folios = {c['folio'] for c in creditos_punteados}
+            # Obtener no entregados
+            no_entregados = db_local.obtener_no_entregados_fecha(self.ds.fecha)
+            no_entregados_folios = {n['folio'] for n in no_entregados}
 
         # poblar tree
         self.tree_liq.delete(*self.tree_liq.get_children())
@@ -4930,12 +5036,15 @@ ORDER BY V.FOLIO, DA.ID;
             cancelada_otro_dia = v.get('cancelada_otro_dia', False)
             folio = v['folio']
             es_credito_punteado = folio in creditos_punteados_folios
+            es_no_entregado = folio in no_entregados_folios
             
             # Determinar tag
             if cancelada_otro_dia:
                 tag = "cancelada_otro_dia"
             elif cancelada:
                 tag = "cancelada"
+            elif es_no_entregado:
+                tag = "no_entregado"
             elif es_credito_punteado:
                 tag = "credito_punteado"
             elif es_credito:
@@ -4945,6 +5054,8 @@ ORDER BY V.FOLIO, DA.ID;
             
             # Checkbox de crédito punteado
             checkbox_credito = "☑" if es_credito_punteado else "☐"
+            # Checkbox de no entregado
+            checkbox_no_entreg = "☑" if es_no_entregado else "☐"
             
             # Obtener subtotal y total
             subtotal = v.get('subtotal', 0)
@@ -4962,6 +5073,8 @@ ORDER BY V.FOLIO, DA.ID;
                 estado = "CANC. OTRO DÍA"
             elif cancelada:
                 estado = "CANCELADA"
+            elif es_no_entregado:
+                estado = "NO ENTREG. ✓"
             elif es_credito_punteado:
                 estado = "CRÉDITO ✓"
             elif es_credito:
@@ -4983,7 +5096,7 @@ ORDER BY V.FOLIO, DA.ID;
                     if i == 0:
                         # Primera fila: mostrar todos los datos de la venta
                         self.tree_liq.insert("", tk.END,
-                                             values=(checkbox_credito, folio, v['nombre'],
+                                             values=(checkbox_credito, checkbox_no_entreg, folio, v['nombre'],
                                                      f"${subtotal:,.0f}",
                                                      art_dev,
                                                      f"${precio_dev:,.0f}",
@@ -4997,7 +5110,7 @@ ORDER BY V.FOLIO, DA.ID;
                     else:
                         # Filas adicionales: solo mostrar datos de devolución
                         self.tree_liq.insert("", tk.END,
-                                             values=("", "", "",
+                                             values=("", "", "", "",
                                                      "",
                                                      art_dev,
                                                      f"${precio_dev:,.0f}",
@@ -5011,7 +5124,7 @@ ORDER BY V.FOLIO, DA.ID;
             else:
                 # Sin devoluciones: fila normal
                 self.tree_liq.insert("", tk.END,
-                                     values=(checkbox_credito, folio, v['nombre'],
+                                     values=(checkbox_credito, checkbox_no_entreg, folio, v['nombre'],
                                              f"${subtotal:,.0f}",
                                              "—",
                                              "—",
@@ -5070,6 +5183,17 @@ ORDER BY V.FOLIO, DA.ID;
             else:
                 # Sin filtro: todos los créditos punteados
                 total_creditos_punteados = db_local.obtener_total_creditos_punteados(self.ds.fecha)
+        
+        # 10b. Total No Entregados (desde SQLite) - dinámico según filtro
+        total_no_entregados = 0
+        if USE_SQLITE and self.ds.fecha:
+            if filtro and filtro not in ("(Todos)", "(Sin Asignar)"):
+                # Filtro específico: solo no entregados de los folios del repartidor
+                folios_repartidor = [v['folio'] for v in ventas]
+                total_no_entregados = db_local.obtener_total_no_entregados_por_folios(self.ds.fecha, folios_repartidor)
+            else:
+                # Sin filtro: todos los no entregados
+                total_no_entregados = db_local.obtener_total_no_entregados(self.ds.fecha)
         
         # Filtro para gastos: solo aplica si es un repartidor específico
         filtro_gastos = filtro if filtro and filtro not in ("(Todos)", "(Sin Asignar)") else ''
@@ -5160,10 +5284,16 @@ ORDER BY V.FOLIO, DA.ID;
         if USE_SQLITE and self.ds.fecha:
             total_creditos_punteados_general = db_local.obtener_total_creditos_punteados(self.ds.fecha)
         
+        # No entregados general (sin filtro)
+        total_no_entregados_general = 0
+        if USE_SQLITE and self.ds.fecha:
+            total_no_entregados_general = db_local.obtener_total_no_entregados(self.ds.fecha)
+        
         self.lbl_total_desc_cuadre.config(text=f"${total_descuentos_cuadre_general:,.2f}")
         self.lbl_total_creditos_punteados.config(text=f"${total_creditos_punteados_general:,.2f}")
-        # Total Efectivo Caja = Total Dinero Caja - Total Descuentos - Créditos Punteados
-        total_efectivo_caja = total_dinero_caja - total_descuentos_cuadre_general - total_creditos_punteados_general
+        self.lbl_total_no_entregados.config(text=f"${total_no_entregados_general:,.2f}")
+        # Total Efectivo Caja = Total Dinero Caja - Total Descuentos - Créditos Punteados - No Entregados
+        total_efectivo_caja = total_dinero_caja - total_descuentos_cuadre_general - total_creditos_punteados_general - total_no_entregados_general
         self.lbl_total_efectivo_caja.config(text=f"${total_efectivo_caja:,.2f}",
                                              foreground="#2e7d32" if total_efectivo_caja >= 0 else "#c62828")
         self.lbl_total_credito.config(text=f"${total_credito:,.2f}")
@@ -5202,8 +5332,11 @@ ORDER BY V.FOLIO, DA.ID;
         # Créditos Punteados
         self.lbl_creditos_punt_resultado.config(text=f"${total_creditos_punteados:,.2f}")
         
-        # TOTAL DINERO A ENTREGAR = Monto Facturas - Total Descuentos - Créditos Punteados
-        total_dinero_entregar = monto_facturas_resultado - total_descuentos_col2 - total_creditos_punteados
+        # No Entregados
+        self.lbl_no_entreg_resultado.config(text=f"${total_no_entregados:,.2f}")
+        
+        # TOTAL DINERO A ENTREGAR = Monto Facturas - Total Descuentos - Créditos Punteados - No Entregados
+        total_dinero_entregar = monto_facturas_resultado - total_descuentos_col2 - total_creditos_punteados - total_no_entregados
         
         self.lbl_neto.config(text=f"${total_dinero_entregar:,.2f}",
                              foreground="#2e7d32" if total_dinero_entregar >= 0 else "#c62828")
@@ -5293,20 +5426,43 @@ ORDER BY V.FOLIO, DA.ID;
                 from corte_cajero import CorteCajeroManager
                 import database_local as db
                 
-                manager = CorteCajeroManager()
+                # Usar la misma ruta FDB que el resto de la app (self.ruta_fdb)
+                fdb_path = self.ruta_fdb
+                print(f"[Corte Cajero] Usando FDB: {fdb_path}")
+                
+                if not fdb_path or not os.path.exists(fdb_path):
+                    print(f"[Corte Cajero] ERROR: FDB no encontrado: {fdb_path}")
+                    self.ventana.after(0, lambda: self._mostrar_error_corte_cajero("FDB no configurado"))
+                    return
+                
+                manager = CorteCajeroManager(db_path=fdb_path)
                 
                 # Usar la fecha seleccionada o la actual
                 fecha = self.ds.fecha if hasattr(self.ds, 'fecha') and self.ds.fecha else None
+                print(f"[Corte Cajero] Fecha: {fecha}")
                 
                 if fecha:
-                    # Obtener TODOS los turnos del día y sumar sus totales
+                    # Primero intentar obtener turnos del día
+                    print(f"[Corte Cajero] Buscando turnos para fecha: {fecha}")
                     turnos = manager.obtener_todos_turnos_por_fecha(fecha)
+                    print(f"[Corte Cajero] Turnos encontrados: {turnos}")
+                    
                     if turnos:
+                        # Hay turnos para esta fecha, usar método por turno
+                        print(f"[Corte Cajero] Obteniendo corte completo por turnos...")
                         corte = manager.obtener_corte_completo_por_fecha(fecha)
-                        turno_id = turnos[-1]  # Usar el último turno como referencia
-                        # Mostrar cuántos turnos hay
+                        turno_id = turnos[-1]
                         num_turnos = len(turnos)
                     else:
+                        # NO hay turnos para esta fecha - usar método por FECHA DE VENTAS
+                        # Esto resuelve el caso donde el cajero dejó el turno abierto de un día anterior
+                        print(f"[Corte Cajero] No hay turnos, usando método por fecha de ventas...")
+                        corte = manager.obtener_corte_por_fecha_ventas(fecha)
+                        turno_id = 0
+                        num_turnos = 0
+                    
+                    if corte is None:
+                        print(f"[Corte Cajero] No se encontraron datos para la fecha {fecha}")
                         self.ventana.after(0, self._limpiar_corte_cajero)
                         return
                 else:
@@ -5363,7 +5519,11 @@ ORDER BY V.FOLIO, DA.ID;
                 self.ventana.after(0, lambda t=turno_id, c=corte, n=num_turnos: self._aplicar_datos_corte(c, t, n))
                 
             except Exception as e:
+                import traceback
                 print(f"⚠️ Error al cargar corte cajero: {e}")
+                traceback.print_exc()
+                # Mostrar el error en la interfaz
+                self.ventana.after(0, lambda err=str(e): self._mostrar_error_corte_cajero(err))
                 self.ventana.after(0, self._limpiar_corte_cajero)
         
         # Ejecutar en hilo separado
@@ -5463,12 +5623,15 @@ ORDER BY V.FOLIO, DA.ID;
                 self.lbl_corte_asign_ventas.config(text=f"${corte.ventas.total:,.2f}")
                 self.lbl_corte_asign_ganancia.config(text=f"${corte.ganancia:,.2f}")
                 self.lbl_corte_asign_devs.config(text=f"${corte.ventas.devoluciones_ventas:,.2f}")
-                if turno_id:
+                if turno_id and turno_id > 0:
                     # Mostrar número de turnos si hay más de 1
                     if num_turnos > 1:
                         self.lbl_corte_asign_turno.config(text=f"#{turno_id} ({num_turnos} turnos)")
                     else:
                         self.lbl_corte_asign_turno.config(text=f"#{turno_id}")
+                else:
+                    # Cuando no hay turno específico (corte por fecha de ventas)
+                    self.lbl_corte_asign_turno.config(text="#POR FECHA")
             
             # --- ACTUALIZAR CANCELACIONES POR USUARIO ---
             self._actualizar_cancelaciones_por_usuario(corte.dinero_en_caja.devoluciones_en_efectivo)
@@ -5713,6 +5876,18 @@ ORDER BY V.FOLIO, DA.ID;
             self.lbl_corte_total_cancelaciones.config(text="$0.00")
         if hasattr(self, 'lbl_corte_num_cancelaciones'):
             self.lbl_corte_num_cancelaciones.config(text="0")
+    
+    def _mostrar_error_corte_cajero(self, error_msg: str):
+        """Muestra un error relacionado con el Corte Cajero."""
+        self._limpiar_corte_cajero()
+        # Mostrar el error en el label de turno para que el usuario sepa
+        if hasattr(self, 'lbl_corte_asign_turno'):
+            if "No se encontró la base de datos" in error_msg:
+                self.lbl_corte_asign_turno.config(text="#ERROR FDB")
+            elif "No se encontró isql" in error_msg:
+                self.lbl_corte_asign_turno.config(text="#NO ISQL")
+            else:
+                self.lbl_corte_asign_turno.config(text="#ERROR")
 
     def _agregar_pago_proveedor(self):
         """Agrega un nuevo pago a proveedor."""
