@@ -31,6 +31,50 @@ import time
 # Agregar el directorio actual al path para importaciones relativas
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Importar temas y base de datos para cargar tema guardado
+try:
+    from core.themes import TEMAS
+    import database_local as db_local
+    HAS_THEMES = True
+except ImportError:
+    HAS_THEMES = False
+    TEMAS = None
+
+
+def get_splash_colors():
+    """Obtiene los colores del splash según el tema guardado."""
+    if not HAS_THEMES:
+        return {
+            'bg': "#1a1a2e",
+            'accent': "#16213e", 
+            'border': "#0f3460",
+            'text': "#ffffff",
+            'subtext': "#7f8fa6",
+            'highlight': "#e94560",
+            'progress_bg': "#16213e",
+            'progress_fill': "#e94560",
+            'status': "#00d9ff"
+        }
+    
+    try:
+        tema_id = db_local.obtener_config('tema_actual', 'oscuro')
+        tema = TEMAS.get(tema_id, TEMAS.get('oscuro', {}))
+    except Exception:
+        tema = TEMAS.get('oscuro', {})
+    
+    # Mapear colores del tema al splash (usando las claves correctas del tema)
+    return {
+        'bg': tema.get('BG_DARKER', "#1a1a2e"),
+        'accent': tema.get('BG_CARD', "#16213e"),
+        'border': tema.get('BORDER_COLOR', "#0f3460"),
+        'text': tema.get('TEXT_PRIMARY', "#ffffff"),
+        'subtext': tema.get('TEXT_SECONDARY', "#7f8fa6"),
+        'highlight': tema.get('PRIMARY', "#e94560"),
+        'progress_bg': tema.get('BG_DARK', "#16213e"),
+        'progress_fill': tema.get('SUCCESS', "#4CAF50"),
+        'status': tema.get('PRIMARY_LIGHT', "#00d9ff")
+    }
+
 
 class SplashScreen:
     """Pantalla de carga animada mientras se inicializa la aplicación."""
@@ -46,14 +90,15 @@ class SplashScreen:
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
         
-        # Colores del splash
-        BG_COLOR = "#1a1a2e"  # Fondo oscuro azulado
-        ACCENT = "#16213e"   # Acento
+        # Colores del splash según tema guardado
+        colors = get_splash_colors()
+        BG_COLOR = colors['bg']
+        ACCENT = colors['accent']
         
         self.root.configure(bg=BG_COLOR)
         
         # Frame principal con borde
-        main_frame = tk.Frame(self.root, bg=BG_COLOR, highlightbackground="#0f3460", 
+        main_frame = tk.Frame(self.root, bg=BG_COLOR, highlightbackground=colors['border'], 
                               highlightthickness=2)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -63,25 +108,25 @@ class SplashScreen:
         
         # Logo/Título
         tk.Label(inner_frame, text="💰", font=("Segoe UI Emoji", 52), 
-                bg=BG_COLOR, fg="#e94560").pack(pady=(15, 5))
+                bg=BG_COLOR, fg=colors['highlight']).pack(pady=(15, 5))
         
         tk.Label(inner_frame, text="LIQUIDADOR", font=("Segoe UI", 26, "bold"), 
-                bg=BG_COLOR, fg="#ffffff").pack()
+                bg=BG_COLOR, fg=colors['text']).pack()
         
         tk.Label(inner_frame, text="DE REPARTIDORES", font=("Segoe UI", 13), 
-                bg=BG_COLOR, fg="#7f8fa6").pack()
+                bg=BG_COLOR, fg=colors['subtext']).pack()
         
         # Separador visual
-        separator = tk.Frame(inner_frame, height=2, bg="#0f3460")
+        separator = tk.Frame(inner_frame, height=2, bg=colors['border'])
         separator.pack(fill=tk.X, pady=15)
         
         # Mensaje de estado con fondo para mejor visibilidad
-        status_frame = tk.Frame(inner_frame, bg="#16213e", padx=10, pady=5)
+        status_frame = tk.Frame(inner_frame, bg=ACCENT, padx=10, pady=5)
         status_frame.pack(fill=tk.X)
         
         self.status_var = tk.StringVar(value="Iniciando...")
         self.status_label = tk.Label(status_frame, textvariable=self.status_var,
-                                     font=("Segoe UI", 11), bg="#16213e", fg="#00d9ff",
+                                     font=("Segoe UI", 11), bg=ACCENT, fg=colors['status'],
                                      anchor="center")
         self.status_label.pack(fill=tk.X)
         
@@ -90,25 +135,26 @@ class SplashScreen:
         progress_frame.pack(fill=tk.X, pady=(15, 10))
         
         # Barra de progreso con Canvas personalizado (más visible)
-        self.progress_canvas = tk.Canvas(progress_frame, height=20, bg="#16213e", 
-                                         highlightthickness=1, highlightbackground="#0f3460")
+        self.progress_canvas = tk.Canvas(progress_frame, height=20, bg=colors['progress_bg'], 
+                                         highlightthickness=1, highlightbackground=colors['border'])
         self.progress_canvas.pack(fill=tk.X)
         
         # Dibujar barra de fondo
         self.progress_canvas.update_idletasks()
         self.canvas_width = 360
+        self.progress_fill_color = colors['progress_fill']
         self.progress_bar = self.progress_canvas.create_rectangle(
-            2, 2, 2, 18, fill="#e94560", outline=""
+            2, 2, 2, 18, fill=self.progress_fill_color, outline=""
         )
         
         # Porcentaje
         self.progress_text = self.progress_canvas.create_text(
-            180, 10, text="0%", fill="#ffffff", font=("Segoe UI", 9, "bold")
+            180, 10, text="0%", fill=colors['text'], font=("Segoe UI", 9, "bold")
         )
         
         # Versión
         tk.Label(inner_frame, text="v2.1.0", font=("Segoe UI", 9), 
-                bg=BG_COLOR, fg="#533483").pack(side=tk.BOTTOM, pady=(5, 0))
+                bg=BG_COLOR, fg=colors['subtext']).pack(side=tk.BOTTOM, pady=(5, 0))
         
         self.root.update()
     

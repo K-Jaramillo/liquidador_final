@@ -46,12 +46,12 @@ class TabAnotaciones:
     Versión mejorada: sin límite de notas, filtrado por fecha robusto.
     """
     
-    # Configuración de distribución de notas
-    NOTA_ANCHO = 240
-    NOTA_ALTO = 260  # Altura amplia para mostrar adjuntos
-    MARGEN_X = 20
-    MARGEN_Y = 20
-    COLUMNAS_MAX = 6
+    # Configuración de distribución de notas - más compacta
+    NOTA_ANCHO = 200
+    NOTA_ALTO = 180  # Altura reducida
+    MARGEN_X = 15
+    MARGEN_Y = 15
+    COLUMNAS_MAX = 8  # Más columnas para mejor uso del espacio
     
     def __init__(self, parent: ttk.Frame, app, datastore):
         """
@@ -287,19 +287,31 @@ class TabAnotaciones:
         tab.rowconfigure(1, weight=1)
         
         # ══════════════════════════════════════════════════════════════
-        # BARRA DE HERRAMIENTAS
+        # BARRA DE HERRAMIENTAS - Diseño responsivo con grid
         # ══════════════════════════════════════════════════════════════
-        toolbar = ttk.Frame(tab)
-        toolbar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        toolbar_container = ttk.Frame(tab)
+        toolbar_container.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 3))
+        toolbar_container.columnconfigure(0, weight=1)
         
-        ttk.Button(toolbar, text="➕ Nueva Nota", command=self._nueva_anotacion).pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar, text="📋 Nueva Lista", command=self._nueva_lista).pack(side=tk.LEFT, padx=5)
+        # Fila 1: Botones principales
+        toolbar_row1 = ttk.Frame(toolbar_container)
+        toolbar_row1.grid(row=0, column=0, sticky="ew", pady=2)
+        
+        # Frame izquierdo: botones de crear
+        left_frame = ttk.Frame(toolbar_row1)
+        left_frame.pack(side=tk.LEFT, fill=tk.X)
+        
+        ttk.Button(left_frame, text="➕ Nota", command=self._nueva_anotacion, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(left_frame, text="📋 Lista", command=self._nueva_lista, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(left_frame, text="🔄", command=self._reorganizar_notas, width=4).pack(side=tk.LEFT, padx=2)
         
         # Variable de fecha (se sincroniza con DataStore)
         self.fecha_var = tk.StringVar(value=self._fecha_actual())
         
-        # Colores predefinidos
-        ttk.Label(toolbar, text="Color:").pack(side=tk.LEFT, padx=(20, 5))
+        # Frame central: colores (compacto)
+        color_frame = ttk.Frame(toolbar_row1)
+        color_frame.pack(side=tk.LEFT, padx=10)
+        
         self.color_nota_var = tk.StringVar(value="#FFEB3B")
         colores = [
             ("#FFEB3B", "🟡"),  # Amarillo
@@ -310,25 +322,21 @@ class TabAnotaciones:
             ("#EF9A9A", "🔴"),  # Rojo claro
         ]
         for color, emoji in colores:
-            btn = tk.Button(toolbar, text=emoji, width=3, bg=color, 
+            btn = tk.Button(color_frame, text="", width=2, height=1, bg=color, 
+                           relief=tk.FLAT, bd=1,
                            command=lambda c=color: self.color_nota_var.set(c))
             btn.pack(side=tk.LEFT, padx=1)
         
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=15)
+        # Frame derecho: filtro (compacto)
+        right_frame = ttk.Frame(toolbar_row1)
+        right_frame.pack(side=tk.RIGHT, padx=5)
         
-        # Filtro
-        ttk.Label(toolbar, text="Filtro:").pack(side=tk.LEFT, padx=5)
         self.filtro_notas_var = tk.StringVar(value="Activas")
-        filtro_combo = ttk.Combobox(toolbar, textvariable=self.filtro_notas_var,
+        filtro_combo = ttk.Combobox(right_frame, textvariable=self.filtro_notas_var,
                                     values=["Activas", "Archivadas", "Todas", "Eliminadas"],
-                                    state="readonly", width=12)
+                                    state="readonly", width=10)
         filtro_combo.pack(side=tk.LEFT)
         filtro_combo.bind("<<ComboboxSelected>>", lambda e: self._cargar_anotaciones())
-        
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=15)
-        
-        # Botones de ordenamiento
-        ttk.Button(toolbar, text="🔄 Reorganizar", command=self._reorganizar_notas).pack(side=tk.LEFT, padx=5)
         
         # ══════════════════════════════════════════════════════════════
         # CANVAS PARA STICKY NOTES
@@ -694,8 +702,8 @@ class TabAnotaciones:
             except Exception:
                 pass
         
-        # Barra de título
-        barra = tk.Frame(frame, bg=self._oscurecer_color(color), height=25)
+        # Barra de título - altura fija y compacta
+        barra = tk.Frame(frame, bg=self._oscurecer_color(color), height=22)
         barra.pack(fill=tk.X)
         barra.pack_propagate(False)
         
@@ -709,46 +717,39 @@ class TabAnotaciones:
         # Indicador de adjuntos (attachments ya se obtuvieron arriba)
         attach_icon = f"📎{len(attachments)}" if attachments else ''
         eliminada_icon = '🗑️' if eliminada else ''
-        titulo_display = f"{tipo_icon}{icon} {titulo[:12]}{attach_icon}{eliminada_icon}"
+        # Título más corto para evitar overflow
+        titulo_corto = titulo[:10] + "…" if len(titulo) > 10 else titulo
+        titulo_display = f"{tipo_icon}{icon}{titulo_corto}"
         
         lbl_titulo = tk.Label(barra, text=titulo_display, 
                               bg=self._oscurecer_color(color),
-                              font=("Segoe UI", 9, "bold"), anchor="w",
+                              font=("Segoe UI", 8, "bold"), anchor="w",
                               fg="#999999" if eliminada else "black")
-        lbl_titulo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        lbl_titulo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         
         # Doble clic para renombrar el título directamente
         lbl_titulo.bind("<Double-Button-1>", lambda e: self._renombrar_titulo_inline(nota_id, barra, lbl_titulo, color))
         
-        # Botones de control
+        # Botones de control - más compactos con padding reducido
         btn_frame = tk.Frame(barra, bg=self._oscurecer_color(color))
         btn_frame.pack(side=tk.RIGHT)
         
-        # Botón para adjuntar foto rápidamente
-        tk.Button(btn_frame, text="📷", font=("Segoe UI", 8), bd=0, 
-                  bg=self._oscurecer_color(color), 
-                  command=lambda: self._adjuntar_foto_rapido(nota_id)).pack(side=tk.LEFT)
+        # Estilo común para botones compactos
+        btn_style = {"font": ("Segoe UI", 7), "bd": 0, "padx": 1, "pady": 0,
+                     "bg": self._oscurecer_color(color), "width": 2}
         
-        tk.Button(btn_frame, text="✏️", font=("Segoe UI", 8), bd=0, 
-                  bg=self._oscurecer_color(color), 
-                  command=lambda: self._editar_anotacion(nota_id)).pack(side=tk.LEFT)
+        # Botón para adjuntar foto rápidamente
+        tk.Button(btn_frame, text="📷", command=lambda: self._adjuntar_foto_rapido(nota_id), **btn_style).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="✏️", command=lambda: self._editar_anotacion(nota_id), **btn_style).pack(side=tk.LEFT)
         
         if eliminada:
-            tk.Button(btn_frame, text="♻️", font=("Segoe UI", 8), bd=0,
-                      bg=self._oscurecer_color(color), 
-                      command=lambda: self._restaurar_nota(nota_id)).pack(side=tk.LEFT)
+            tk.Button(btn_frame, text="♻️", command=lambda: self._restaurar_nota(nota_id), **btn_style).pack(side=tk.LEFT)
         elif archivada:
-            tk.Button(btn_frame, text="📤", font=("Segoe UI", 8), bd=0,
-                      bg=self._oscurecer_color(color), 
-                      command=lambda: self._desarchivar_nota(nota_id)).pack(side=tk.LEFT)
+            tk.Button(btn_frame, text="📤", command=lambda: self._desarchivar_nota(nota_id), **btn_style).pack(side=tk.LEFT)
         else:
-            tk.Button(btn_frame, text="📥", font=("Segoe UI", 8), bd=0,
-                      bg=self._oscurecer_color(color), 
-                      command=lambda: self._archivar_nota(nota_id)).pack(side=tk.LEFT)
+            tk.Button(btn_frame, text="📥", command=lambda: self._archivar_nota(nota_id), **btn_style).pack(side=tk.LEFT)
         
-        tk.Button(btn_frame, text="❌", font=("Segoe UI", 8), bd=0,
-                  bg=self._oscurecer_color(color), 
-                  command=lambda: self._eliminar_anotacion(nota_id)).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="❌", command=lambda: self._eliminar_anotacion(nota_id), **btn_style).pack(side=tk.LEFT)
         
         # Contenido de la nota
         if es_checklist:
@@ -760,15 +761,27 @@ class TabAnotaciones:
         if attachments:
             self._crear_vista_adjuntos(frame, nota_id, attachments, color)
         
+        # Grip de redimensionamiento en esquina inferior derecha - compacto
+        grip_frame = tk.Frame(frame, bg=color, height=14)
+        grip_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        grip = tk.Label(grip_frame, text="◢", font=("Segoe UI", 8), 
+                        bg=self._oscurecer_color(color), fg="#888888",
+                        cursor="bottom_right_corner", padx=1, pady=0)
+        grip.pack(side=tk.RIGHT, anchor="se")
+        
         # Crear ventana en canvas
         window_id = self.canvas_notas.create_window(x, y, window=frame, anchor="nw", 
                                                      width=ancho, height=altura)
         
-        self.notas_widgets[window_id] = {'nota_id': nota_id, 'frame': frame}
+        self.notas_widgets[window_id] = {'nota_id': nota_id, 'frame': frame, 'ancho': ancho, 'alto': altura}
         
         # Hacer la nota arrastrable desde la barra de título y el label
         self._hacer_arrastrable(window_id, barra, nota_id)
         self._hacer_arrastrable(window_id, lbl_titulo, nota_id)
+        
+        # Hacer la nota redimensionable desde el grip
+        self._hacer_redimensionable(window_id, grip, nota_id, ancho, altura)
         
         # Binding para pegar imagen con Ctrl+V en cualquier parte de la nota
         frame.bind('<Control-v>', lambda e, nid=nota_id: self._handle_paste(e, nid))
@@ -1067,7 +1080,7 @@ class TabAnotaciones:
                     if os.path.exists(full_path):
                         img = Image.open(full_path)
                         img.thumbnail((35, 35))
-                        photo = ImageTk.PhotoImage(img)
+                        photo = ImageTk.PhotoImage(img, master=self.app.ventana)
                         
                         key = f"{nota_id}_{i}"
                         self._thumb_refs[key] = photo
@@ -1128,8 +1141,8 @@ class TabAnotaciones:
         visor.geometry("700x550")
         visor.configure(bg="#1a1a1a")
         
-        # Variables de navegación
-        indice_actual = tk.IntVar(value=0)
+        # Variables de navegación (con master explícito)
+        indice_actual = tk.IntVar(master=visor, value=0)
         
         # Guardar referencias de imágenes
         if not hasattr(self, '_visor_img_refs'):
@@ -1204,7 +1217,7 @@ class TabAnotaciones:
                 if ratio < 1.0:
                     img = img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
                 
-                photo = PILImageTk.PhotoImage(img)
+                photo = PILImageTk.PhotoImage(img, master=visor)
                 self._visor_img_refs[nota_id] = photo  # Guardar referencia
                 
                 lbl_imagen.config(image=photo, text='')
@@ -1242,7 +1255,7 @@ class TabAnotaciones:
                 if os.path.exists(full_path):
                     img = PILImage.open(full_path)
                     img.thumbnail((40, 40))
-                    photo = PILImageTk.PhotoImage(img)
+                    photo = PILImageTk.PhotoImage(img, master=visor)
                     
                     key = f"visor_thumb_{nota_id}_{i}"
                     self._visor_img_refs[key] = photo
@@ -1360,6 +1373,75 @@ class TabAnotaciones:
         widget.bind("<ButtonPress-1>", on_press, add="+")
         widget.bind("<B1-Motion>", on_drag, add="+")
         widget.bind("<ButtonRelease-1>", on_release, add="+")
+    
+    def _hacer_redimensionable(self, window_id, grip, nota_id, ancho_inicial, alto_inicial):
+        """Permite redimensionar la nota arrastrando desde el grip."""
+        
+        # Datos de redimensionamiento
+        resize_data = {'ancho': ancho_inicial, 'alto': alto_inicial}
+        
+        def on_resize_start(event):
+            """Inicia el redimensionamiento."""
+            resize_data['start_x'] = event.x_root
+            resize_data['start_y'] = event.y_root
+            resize_data['resizing'] = True
+            # Obtener tamaño actual del item del canvas
+            if window_id in self.notas_widgets:
+                resize_data['ancho'] = self.notas_widgets[window_id].get('ancho', ancho_inicial)
+                resize_data['alto'] = self.notas_widgets[window_id].get('alto', alto_inicial)
+            print(f"[DEBUG] Iniciando resize nota {nota_id}, tamaño actual: {resize_data['ancho']}x{resize_data['alto']}")
+        
+        def on_resize_drag(event):
+            """Redimensiona durante el arrastre."""
+            if not resize_data.get('resizing'):
+                return
+            
+            # Calcular diferencia
+            dx = event.x_root - resize_data['start_x']
+            dy = event.y_root - resize_data['start_y']
+            
+            # Nuevo tamaño con límites mínimos
+            nuevo_ancho = max(120, resize_data['ancho'] + dx)
+            nuevo_alto = max(80, resize_data['alto'] + dy)
+            
+            # Actualizar el canvas window
+            try:
+                self.canvas_notas.itemconfig(window_id, width=nuevo_ancho, height=nuevo_alto)
+            except Exception as e:
+                print(f"[ERROR] Error durante resize: {e}")
+        
+        def on_resize_end(event):
+            """Finaliza el redimensionamiento y guarda en BD."""
+            if not resize_data.get('resizing'):
+                return
+            
+            resize_data['resizing'] = False
+            
+            # Calcular tamaño final
+            dx = event.x_root - resize_data['start_x']
+            dy = event.y_root - resize_data['start_y']
+            nuevo_ancho = max(120, resize_data['ancho'] + dx)
+            nuevo_alto = max(80, resize_data['alto'] + dy)
+            
+            # Guardar en BD
+            try:
+                if HAS_DB:
+                    db_local.actualizar_anotacion(nota_id, ancho=nuevo_ancho, alto=nuevo_alto)
+                    print(f"[DEBUG] Guardado tamaño nota {nota_id}: {nuevo_ancho}x{nuevo_alto}")
+                
+                # Actualizar widget data
+                if window_id in self.notas_widgets:
+                    self.notas_widgets[window_id]['ancho'] = nuevo_ancho
+                    self.notas_widgets[window_id]['alto'] = nuevo_alto
+                
+                self._actualizar_scrollregion()
+            except Exception as e:
+                print(f"[ERROR] Error guardando tamaño: {e}")
+        
+        # Vincular eventos al grip
+        grip.bind("<ButtonPress-1>", on_resize_start)
+        grip.bind("<B1-Motion>", on_resize_drag)
+        grip.bind("<ButtonRelease-1>", on_resize_end)
     
     def _nueva_anotacion(self):
         """Crea una nueva anotación de texto preguntando primero la prioridad."""

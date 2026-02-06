@@ -692,9 +692,10 @@ class LiquidadorRepartidores:
         # Editor inline activo (referencia para destruirlo si existe)
         self._editor_activo = None
 
-        # Tema actual (valor por defecto)
-        self.tema_actual = 'oscuro'
-        self.modo_oscuro = True
+        # Tema actual - cargar desde configuración persistente
+        tema_guardado = db_local.obtener_config('tema_actual', 'oscuro')
+        self.tema_actual = tema_guardado if tema_guardado in TEMAS else 'oscuro'
+        self.modo_oscuro = self.tema_actual != 'claro'
 
         self._crear_interfaz()
 
@@ -3816,6 +3817,10 @@ ORDER BY V.FOLIO, DA.ID;
         print(f"[DEBUG] Tema ID: {tema_id}")
         self.tema_actual = tema_id
         self.modo_oscuro = tema_id != 'claro'  # Compatibilidad
+        
+        # Guardar tema en configuración persistente
+        db_local.guardar_config('tema_actual', tema_id)
+        
         self._aplicar_tema()
         self._actualizar_tags_treeviews()
     
@@ -4052,6 +4057,12 @@ ORDER BY V.FOLIO, DA.ID;
         # Botón GUARDAR LIQUIDACIÓN
         ttk.Button(frame_inf, text="💾 Guardar Liquidación",
                    command=self._guardar_liquidacion, style="Success.TButton").pack(side=tk.RIGHT, padx=5)
+        
+        # Botones de actualización (a la izquierda de Guardar)
+        ttk.Button(frame_inf, text="🔄 Actualizar Cuadre", 
+                   command=self._refrescar_liquidacion).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(frame_inf, text="🔄 Actualizar Corte", 
+                   command=self._actualizar_corte_cajero_async).pack(side=tk.RIGHT, padx=5)
 
         # --- CUADRE ALMACEN (CAJA) ---
         frame_fin = ttk.LabelFrame(self.tab_liquidacion, text="📦 CUADRE ALMACEN (CAJA)", padding=(10, 8))
@@ -4214,16 +4225,6 @@ ORDER BY V.FOLIO, DA.ID;
         self.lbl_diferencia_global.grid(row=7, column=1, sticky=tk.E, padx=(10, 0))
         
         # ═══════════════════════════════════════════════════════════════════════
-        # COLUMNA 4: BOTÓN ACTUALIZAR
-        # ═══════════════════════════════════════════════════════════════════════
-        col_btn = ttk.Frame(frame_fin)
-        col_btn.grid(row=0, column=3, sticky="nse", padx=(15, 0))
-        
-        btn_actualizar_cuadre = ttk.Button(col_btn, text="🔄 Actualizar Cuadre", 
-                                           command=self._refrescar_liquidacion)
-        btn_actualizar_cuadre.pack(pady=5)
-
-        # ═══════════════════════════════════════════════════════════════════════
         # FILA 2: CORTE CAJERO (DATOS DE ELEVENTA)
         # ═══════════════════════════════════════════════════════════════════════
         frame_corte = ttk.LabelFrame(self.tab_liquidacion, text="📊 CORTE CAJERO (ELEVENTA)", padding=(10, 5))
@@ -4365,10 +4366,6 @@ ORDER BY V.FOLIO, DA.ID;
         self.lbl_corte_exp_total_dev = ttk.Label(col_info, text="$0", font=("Segoe UI", 9, "bold"), foreground="#c62828")
         self.lbl_corte_exp_total_dev.grid(row=5, column=1, sticky=tk.E, padx=(10, 0))
         
-        # Botón para actualizar corte (usa versión async)
-        ttk.Button(col_info, text="🔄 Actualizar Corte", 
-                   command=self._actualizar_corte_cajero_async).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-
         # --- COLUMNA 4: CANCELACIONES POR USUARIO ---
         col_cancel = ttk.Frame(frame_corte)
         col_cancel.grid(row=0, column=3, sticky="nsew", padx=(20, 0))
