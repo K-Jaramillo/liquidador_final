@@ -687,7 +687,7 @@ class LiquidadorRepartidores:
         self.ds = DataStore()
 
         # Variable compartida para repartidor filtro en Liquidación
-        self.repartidor_filtro_var = tk.StringVar()
+        self.repartidor_filtro_var = tk.StringVar(master=self.ventana)
 
         # Editor inline activo (referencia para destruirlo si existe)
         self._editor_activo = None
@@ -704,8 +704,7 @@ class LiquidadorRepartidores:
         # Configurar estilos mejorados
         self._configurar_estilos()
         
-        # Cargar datos de la fecha actual al iniciar (con pequeño delay para que la GUI esté lista)
-        self.ventana.after(500, self._cargar_datos_inicial)
+        # Los datos se cargan desde main.py después de mostrar la ventana
     
     def _cargar_datos_inicial(self):
         """Carga los datos de la fecha actual al iniciar la aplicación."""
@@ -725,15 +724,272 @@ class LiquidadorRepartidores:
                 print(f"⚠️ Archivo de BD Firebird no encontrado: {self.ruta_fdb}")
                 print("   La aplicación funcionará sin datos de Eleventa.")
                 print("   Configura la ruta correcta del archivo PDVDATA.FDB")
+                # Actualizar indicador de estado
+                if hasattr(self, 'lbl_estado_bd'):
+                    self.lbl_estado_bd.config(text="● BD no encontrada", foreground="orange")
                 return
             
-            # Cargar facturas de Firebird (NO bloquear si falla, NO mostrar diálogos al inicio)
-            try:
-                self._cargar_facturas(mostrar_mensajes=False)
-            except Exception as e:
-                print(f"⚠️ No se pudieron cargar facturas: {e}")
+            # Cargar facturas en hilo separado para no bloquear UI
+            self._cargar_facturas_async()
         except Exception as e:
             print(f"⚠️ Error cargando datos iniciales: {e}")
+    
+    def _cargar_facturas_async(self):
+        """Carga facturas en un hilo separado para no bloquear la UI."""
+        import threading
+        
+        # Mostrar indicador de carga
+        if hasattr(self, 'lbl_estado_bd'):
+            self.lbl_estado_bd.config(text="● Cargando...", foreground="#00d9ff")
+        
+        def cargar_en_hilo():
+            try:
+                # Cargar facturas SIN actualizar UI (desde hilo secundario)
+                # Usamos _cargar_facturas_sync que retorna los datos sin notificar
+                ventas_data = self._cargar_facturas_sync()
+                # Actualizar UI desde el hilo principal
+                self.ventana.after(0, lambda: self._aplicar_datos_cargados(ventas_data))
+            except Exception as e:
+                error_msg = str(e)  # Capturar ANTES de que 'e' se elimine
+                print(f"⚠️ No se pudieron cargar facturas: {error_msg}")
+                self.ventana.after(0, lambda msg=error_msg: self._mostrar_error_carga(msg))
+        
+        threading.Thread(target=cargar_en_hilo, daemon=True).start()
+    
+    def _aplicar_datos_cargados(self, ventas_data: dict):
+        """Aplica los datos cargados al DataStore (debe ejecutarse en hilo principal)."""
+        if ventas_data:
+            # Primero cargar devoluciones (necesarias para asignar cajero)
+            if ventas_data.get('devoluciones'):
+                self.ds.devoluciones = ventas_data['devoluciones']
+            if ventas_data.get('movimientos_entrada'):
+                self.ds.movimientos_entrada = ventas_data['movimientos_entrada']
+            if ventas_data.get('movimientos_salida'):
+                self.ds.movimientos_salida = ventas_data['movimientos_salida']
+            # Cargar ventas (esto notifica a los listeners)
+            if ventas_data.get('ventas') is not None:
+                self.ds.set_ventas(ventas_data['ventas'])
+            # Post-procesamiento: asignar cajero a cancelaciones
+            self._asignar_cajero_cancelaciones()
+            # Cargar devoluciones parciales
+            fecha = self.fecha_asign_var.get().strip()
+            if fecha:
+                self._cargar_devoluciones_parciales(fecha)
+        self._finalizar_carga_inicial()
+    
+    def _cargar_facturas_sync(self) -> dict:
+        """Carga facturas de forma síncrona SIN actualizar UI. Retorna dict con datos."""
+        fecha = self.fecha_asign_var.get().strip()
+        if not fecha:
+            return {'ventas': []}
+        
+        self.ds.fecha = fecha
+        
+        # Consulta principal
+        sql = (
+            "SET HEADING ON;\n"
+            "SELECT V.ID, V.FOLIO, V.NOMBRE, V.SUBTOTAL, V.TOTAL, V.ESTA_CANCELADO, V.TOTAL_CREDITO, "
+            "CAST(V.CREADO_EN AS DATE) AS FECHA_CREACION, "
+            "CAST(D.DEVUELTO_EN AS DATE) AS FECHA_CANCELACION, "
+            "V.TURNO_ID\n"
+            "FROM VENTATICKETS V\n"
+            "LEFT JOIN DEVOLUCIONES D ON D.TICKET_ID = V.ID AND D.TIPO_DEVOLUCION = 'C'\n"
+            f"WHERE CAST(V.CREADO_EN AS DATE) = '{fecha}'\n"
+            "ORDER BY V.FOLIO;\n"
+        )
+        ok, stdout, stderr = self._ejecutar_sql(sql)
+        
+        if not ok or not stdout or stdout.strip() == '':
+            return {'ventas': []}
+        
+        ventas = self._parsear_ventas(stdout, fecha)
+        
+        # Canceladas de otro día
+        canceladas_otro_dia = self._cargar_canceladas_otro_dia(fecha)
+        if canceladas_otro_dia:
+            ventas.extend(canceladas_otro_dia)
+        
+        # Devoluciones
+        devoluciones = self._cargar_devoluciones_sync(fecha)
+        
+        # Movimientos
+        entradas, salidas = self._cargar_movimientos_sync(fecha)
+        
+        return {
+            'ventas': ventas,
+            'devoluciones': devoluciones,
+            'movimientos_entrada': entradas,
+            'movimientos_salida': salidas
+        }
+    
+    def _parsear_ventas(self, stdout: str, fecha: str) -> list:
+        """Parsea el resultado SQL de ventas. Thread-safe (no accede a UI)."""
+        ventas = []
+        header_visto = False
+        
+        for linea in stdout.split('\n'):
+            linea = linea.strip()
+            if not linea or linea.startswith('='):
+                continue
+            if 'ID' in linea and 'FOLIO' in linea:
+                header_visto = True
+                continue
+            if not header_visto:
+                continue
+            partes = linea.split()
+            if len(partes) < 9:
+                continue
+            try:
+                id_v = int(partes[0])
+                folio_s = partes[1]
+                if folio_s == '<null>':
+                    continue
+                folio = int(folio_s)
+                
+                turno_id_venta = partes[-1] if partes[-1] != '<null>' else ''
+                fecha_cancelacion = partes[-2] if partes[-2] != '<null>' else ''
+                fecha_creacion = partes[-3] if partes[-3] != '<null>' else fecha
+                total_credito = float(partes[-4]) if partes[-4] != '<null>' else 0.0
+                cancelado_val = partes[-5].lower()
+                esta_cancelado = cancelado_val == 't' or cancelado_val == '1'
+                total_original = float(partes[-6]) if partes[-6] != '<null>' else 0.0
+                subtotal = float(partes[-7]) if partes[-7] != '<null>' else 0.0
+                nombre = ' '.join(partes[2:-7]).replace('<null>', '').strip()
+                if not nombre:
+                    nombre = 'MOSTRADOR'
+                
+                usuario = f"Turno {turno_id_venta}" if turno_id_venta else ''
+                
+                if folio <= 0:
+                    continue
+                
+                rep = obtener_repartidor_factura(folio, fecha) or ''
+                
+                nombre_lower = nombre.lower()
+                if not rep and (nombre_lower.startswith('ticket ') or nombre_lower == 'ticket' or nombre_lower == 'mostrador'):
+                    rep = 'CAJERO'
+                    asignar_repartidor(folio, fecha, 'CAJERO')
+                
+                es_credito = total_credito > 0
+                subtotal_final = subtotal
+                if esta_cancelado:
+                    subtotal_final = total_original
+                
+                ventas.append({
+                    'id': id_v,
+                    'folio': folio,
+                    'nombre': nombre,
+                    'subtotal': subtotal_final,
+                    'total_original': total_original,
+                    'repartidor': rep,
+                    'cancelada': esta_cancelado,
+                    'cancelada_otro_dia': False,
+                    'total_credito': total_credito,
+                    'es_credito': es_credito,
+                    'fecha_creacion': fecha_creacion,
+                    'fecha_cancelacion': fecha_cancelacion,
+                    'turno_id': turno_id_venta,
+                    'usuario': usuario
+                })
+            except (ValueError, IndexError):
+                continue
+        
+        return ventas
+    
+    def _cargar_devoluciones_sync(self, fecha: str) -> list:
+        """Carga devoluciones sin actualizar UI. Thread-safe."""
+        sql = (
+            "SET HEADING ON;\n"
+            "SELECT ID, TICKET_ID, TOTAL_DEVUELTO, CAJERO, TIPO_DEVOLUCION\n"
+            "FROM DEVOLUCIONES\n"
+            f"WHERE CAST(DEVUELTO_EN AS DATE) = '{fecha}'\n"
+            "ORDER BY ID;\n"
+        )
+        ok, stdout, stderr = self._ejecutar_sql(sql)
+        
+        devoluciones = []
+        if ok and stdout:
+            header_visto = False
+            for linea in stdout.split('\n'):
+                linea = linea.strip()
+                if not linea or linea.startswith('='):
+                    continue
+                if 'ID' in linea and 'TICKET_ID' in linea:
+                    header_visto = True
+                    continue
+                if not header_visto:
+                    continue
+                partes = linea.split()
+                if len(partes) >= 5:
+                    try:
+                        dev_id = int(partes[0])
+                        ticket_id = int(partes[1]) if partes[1] != '<null>' else 0
+                        monto = float(partes[2]) if partes[2] != '<null>' else 0.0
+                        cajero = partes[3] if partes[3] != '<null>' else ''
+                        tipo = partes[4] if partes[4] != '<null>' else ''
+                        devoluciones.append({
+                            'id': dev_id,
+                            'ticket_id': ticket_id,
+                            'monto': monto,
+                            'cajero': cajero,
+                            'tipo': tipo
+                        })
+                    except (ValueError, IndexError):
+                        continue
+        return devoluciones
+    
+    def _cargar_movimientos_sync(self, fecha: str) -> tuple:
+        """Carga movimientos sin actualizar UI. Thread-safe. Retorna (entradas, salidas)."""
+        sql = (
+            "SET HEADING ON;\n"
+            "SELECT ID, TIPO, MONTO, COMENTARIOS\n"
+            "FROM MOVIMIENTOS\n"
+            f"WHERE CAST(CUANDO_FUE AS DATE) = '{fecha}'\n"
+            "ORDER BY ID;\n"
+        )
+        ok, stdout, stderr = self._ejecutar_sql(sql)
+        
+        entradas = []
+        salidas = []
+        if ok and stdout:
+            header_visto = False
+            for linea in stdout.split('\n'):
+                linea = linea.strip()
+                if not linea or linea.startswith('='):
+                    continue
+                if 'ID' in linea and 'TIPO' in linea:
+                    header_visto = True
+                    continue
+                if not header_visto:
+                    continue
+                partes = linea.split()
+                if len(partes) >= 3:
+                    try:
+                        mov_id = int(partes[0])
+                        tipo = partes[1].upper()
+                        monto = float(partes[2]) if partes[2] != '<null>' else 0.0
+                        comentario = ' '.join(partes[3:]).replace('<null>', '').strip() if len(partes) > 3 else ''
+                        
+                        mov = {'id': mov_id, 'monto': monto, 'comentario': comentario}
+                        if tipo == 'I':
+                            entradas.append(mov)
+                        elif tipo == 'S':
+                            salidas.append(mov)
+                    except (ValueError, IndexError):
+                        continue
+        return entradas, salidas
+    
+    def _finalizar_carga_inicial(self):
+        """Callback cuando termina la carga inicial de datos."""
+        if hasattr(self, 'lbl_estado_bd'):
+            self.lbl_estado_bd.config(text="● Conectado", foreground="green")
+        # Actualizar corte de cajero también en segundo plano
+        self._actualizar_corte_cajero_async()
+    
+    def _mostrar_error_carga(self, error: str):
+        """Muestra error de carga en la UI."""
+        if hasattr(self, 'lbl_estado_bd'):
+            self.lbl_estado_bd.config(text="● Error BD", foreground="red")
 
     # ------------------------------------------------------------------
     # CONFIGURAR ESTILOS MEJORADOS - TEMAS DE COLORES
@@ -1077,7 +1333,7 @@ class LiquidadorRepartidores:
         
         # Ruta FDB
         ttk.Label(fila1, text="📁 BD:").pack(side=tk.LEFT, padx=(0, 3))
-        self.ruta_fdb_var = tk.StringVar(value=self.ruta_fdb)
+        self.ruta_fdb_var = tk.StringVar(master=self.ventana, value=self.ruta_fdb)
         entry_fdb = ttk.Entry(fila1, textvariable=self.ruta_fdb_var, width=50)
         entry_fdb.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
@@ -1098,7 +1354,7 @@ class LiquidadorRepartidores:
         self.nombres_temas = get_nombres_temas()
         nombres_lista = get_lista_temas()
         
-        self.tema_combo_var = tk.StringVar(value=TEMAS[self.tema_actual]['nombre'])
+        self.tema_combo_var = tk.StringVar(master=self.ventana, value=TEMAS[self.tema_actual]['nombre'])
         self.tema_combo = ttk.Combobox(
             fila1, 
             textvariable=self.tema_combo_var,
@@ -1127,7 +1383,7 @@ class LiquidadorRepartidores:
             self.fecha_global_entry.pack(side=tk.LEFT, padx=(0, 5))
             self.fecha_global_entry.bind("<<DateEntrySelected>>", self._on_fecha_global_cambio)
         else:
-            self.fecha_global_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
+            self.fecha_global_var = tk.StringVar(master=self.ventana, value=datetime.now().strftime('%Y-%m-%d'))
             self.fecha_global_entry = ttk.Entry(fila2, textvariable=self.fecha_global_var, width=12)
             self.fecha_global_entry.pack(side=tk.LEFT, padx=(0, 5))
             self.fecha_global_entry.bind("<Return>", self._on_fecha_global_cambio)
@@ -1150,7 +1406,7 @@ class LiquidadorRepartidores:
         
         # Filtro de repartidor global
         ttk.Label(fila2, text="🚚 Repartidor:").pack(side=tk.LEFT, padx=(0, 3))
-        self.filtro_rep_global_var = tk.StringVar(value="(Todos)")
+        self.filtro_rep_global_var = tk.StringVar(master=self.ventana, value="(Todos)")
         self.combo_filtro_rep_global = ttk.Combobox(fila2, textvariable=self.filtro_rep_global_var,
                                     values=["(Todos)"],
                                     state="readonly", width=16)
@@ -1162,7 +1418,7 @@ class LiquidadorRepartidores:
         
         # Filtro general por estado (visible desde todas las pestañas)
         ttk.Label(fila2, text="🔍 Estado:").pack(side=tk.LEFT, padx=(0, 3))
-        self.filtro_estado_var = tk.StringVar(value="Todos")
+        self.filtro_estado_var = tk.StringVar(master=self.ventana, value="Todos")
         self.combo_filtro_estado = ttk.Combobox(fila2, textvariable=self.filtro_estado_var,
                                     values=["Todos", "Sin Repartidor", "Canceladas", "Crédito"],
                                     state="readonly", width=14)
@@ -1174,7 +1430,7 @@ class LiquidadorRepartidores:
         
         # Buscador global (cliente/folio)
         ttk.Label(fila2, text="🔎 Buscar Cliente:").pack(side=tk.LEFT, padx=(0, 3))
-        self.buscar_global_var = tk.StringVar()
+        self.buscar_global_var = tk.StringVar(master=self.ventana)
         self.entry_buscar_global = ttk.Entry(fila2, textvariable=self.buscar_global_var, width=20)
         self.entry_buscar_global.pack(side=tk.LEFT, padx=(0, 3))
         self.buscar_global_var.trace_add("write", lambda *a: self._on_buscar_global())
@@ -1193,7 +1449,12 @@ class LiquidadorRepartidores:
         self.notebook.add(self.tab_asignacion, text="  Asignar Repartidores  ")
         self._crear_tab_asignacion()
 
-        # Pestaña 1 – Liquidación
+        # Pestaña 1 – Ventas del Día (NUEVA)
+        self.tab_ventas = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_ventas, text="  📊 Ventas del Día  ")
+        self._crear_tab_ventas()
+
+        # Pestaña 2 – Liquidación
         self.tab_liquidacion = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_liquidacion, text="  Liquidación  ")
         self._crear_tab_liquidacion()
@@ -1246,7 +1507,7 @@ class LiquidadorRepartidores:
         
         # Filtro de Estado interno
         ttk.Label(toolbar, text="Estado:", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(5, 2))
-        self.filtro_estado_creditos_var = tk.StringVar(value="Todos")
+        self.filtro_estado_creditos_var = tk.StringVar(master=self.ventana, value="Todos")
         self.combo_filtro_estado_creditos = ttk.Combobox(
             toolbar, 
             textvariable=self.filtro_estado_creditos_var,
@@ -1259,7 +1520,7 @@ class LiquidadorRepartidores:
         
         # Filtro de Origen
         ttk.Label(toolbar, text="Origen:", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(10, 2))
-        self.filtro_origen_creditos_var = tk.StringVar(value="Todos")
+        self.filtro_origen_creditos_var = tk.StringVar(master=self.ventana, value="Todos")
         self.combo_filtro_origen_creditos = ttk.Combobox(
             toolbar, 
             textvariable=self.filtro_origen_creditos_var,
@@ -1842,6 +2103,8 @@ class LiquidadorRepartidores:
     # ------------------------------------------------------------------
     def _on_buscar_global(self):
         """Aplica el filtro de búsqueda en todos los módulos."""
+        busqueda = self.buscar_global_var.get()
+        print(f"[DEBUG] Búsqueda global: '{busqueda}'")
         # Filtrar en asignación
         self._filtrar_facturas_asign()
         # Filtrar en liquidación
@@ -2081,7 +2344,7 @@ class LiquidadorRepartidores:
         frame_top.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
 
         # Variable para sincronizar con fecha global
-        self.fecha_asign_var = tk.StringVar(value=self.ds.fecha)
+        self.fecha_asign_var = tk.StringVar(master=self.ventana, value=self.ds.fecha)
         
         # Botón GUARDAR (deshabilitado por defecto)
         self.btn_guardar_asign = ttk.Button(
@@ -2120,7 +2383,7 @@ class LiquidadorRepartidores:
         # RESUMEN INFERIOR - Se empaqueta PRIMERO con side=BOTTOM
         # para que siempre sea visible
         # ============================================================
-        self.resumen_var = tk.StringVar(value="Carga las facturas para ver el resumen.")
+        self.resumen_var = tk.StringVar(master=self.ventana, value="Carga las facturas para ver el resumen.")
         frame_res = ttk.LabelFrame(self.tab_asignacion, text="📊 RESUMEN DE ASIGNACIÓN", padding=(12, 8))
         frame_res.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 10))
         
@@ -3548,7 +3811,9 @@ ORDER BY V.FOLIO, DA.ID;
     def _on_tema_cambio(self, event=None):
         """Cambia al tema seleccionado en el combobox."""
         nombre_tema = self.tema_combo_var.get()
+        print(f"[DEBUG] Cambio de tema: '{nombre_tema}'")
         tema_id = self.nombres_temas.get(nombre_tema, 'oscuro')
+        print(f"[DEBUG] Tema ID: {tema_id}")
         self.tema_actual = tema_id
         self.modo_oscuro = tema_id != 'claro'  # Compatibilidad
         self._aplicar_tema()
@@ -3678,7 +3943,89 @@ ORDER BY V.FOLIO, DA.ID;
             menu.grab_release()
 
     # ==================================================================
-    # PESTAÑA 1 – LIQUIDACIÓN  (datos en tiempo real desde DataStore)
+    # PESTAÑA – VENTAS DEL DÍA (tabla de facturas con detalles)
+    # ==================================================================
+    def _crear_tab_ventas(self):
+        """Crea la pestaña de Ventas del Día con la tabla de facturas."""
+        
+        # ============================================================
+        # TABLA DE VENTAS - Principal
+        # ============================================================
+        frame_tabla = ttk.LabelFrame(self.tab_ventas, text="📊 VENTAS DEL DÍA", padding=(5, 5))
+        frame_tabla.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        # Contenedor para Treeview con scrollbars
+        tree_liq_container = ttk.Frame(frame_tabla)
+        tree_liq_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.tree_liq = ttk.Treeview(
+            tree_liq_container,
+            columns=("credito", "folio", "cliente", "subtotal", "art_dev", "precio_dev", "cant_dev", "total_dev", "ajuste", "total_desp_aj", "repartidor", "estado"),
+            selectmode="extended", height=15
+        )
+        self.tree_liq.column("#0",           width=0, stretch=tk.NO)
+        self.tree_liq.column("credito",      anchor=tk.CENTER, width=40)
+        self.tree_liq.column("folio",        anchor=tk.CENTER, width=60)
+        self.tree_liq.column("cliente",      anchor=tk.W,      width=160)
+        self.tree_liq.column("subtotal",     anchor=tk.E,      width=85)
+        self.tree_liq.column("art_dev",      anchor=tk.W,      width=110)
+        self.tree_liq.column("precio_dev",   anchor=tk.E,      width=65)
+        self.tree_liq.column("cant_dev",     anchor=tk.CENTER, width=45)
+        self.tree_liq.column("total_dev",    anchor=tk.E,      width=70)
+        self.tree_liq.column("ajuste",       anchor=tk.E,      width=70)
+        self.tree_liq.column("total_desp_aj",anchor=tk.E,      width=95)
+        self.tree_liq.column("repartidor",   anchor=tk.CENTER, width=80)
+        self.tree_liq.column("estado",       anchor=tk.CENTER, width=75)
+
+        self.tree_liq.heading("credito",      text="💳")
+        self.tree_liq.heading("folio",        text="📋 Folio")
+        self.tree_liq.heading("cliente",      text="👤 Cliente")
+        self.tree_liq.heading("subtotal",     text="💵 Subtotal")
+        self.tree_liq.heading("art_dev",      text="↩️ Art.Dev")
+        self.tree_liq.heading("precio_dev",   text="💲 Precio")
+        self.tree_liq.heading("cant_dev",     text="📦 Cant")
+        self.tree_liq.heading("total_dev",    text="💸 TotalDev")
+        self.tree_liq.heading("ajuste",       text="📉 Ajuste")
+        self.tree_liq.heading("total_desp_aj",text="✅ TotalDespAj")
+        self.tree_liq.heading("repartidor",   text="🚚 Rep.")
+        self.tree_liq.heading("estado",       text="📊 Estado")
+
+        # Tags con colores para modo oscuro
+        self.tree_liq.tag_configure("rep_cristian",  background="#37474f", foreground="#80cbc4", font=("Segoe UI", 9))
+        self.tree_liq.tag_configure("rep_cajero",    background="#33691e", foreground="#c5e1a5", font=("Segoe UI", 9))
+        self.tree_liq.tag_configure("rep_david",     background="#4a148c", foreground="#ce93d8", font=("Segoe UI", 9))
+        self.tree_liq.tag_configure("rep_otro",      background="#004d40", foreground="#80cbc4", font=("Segoe UI", 9))
+        self.tree_liq.tag_configure("sin_asignar", background="#4a4a4a", foreground="#ff8a80", font=("Segoe UI", 9))
+        self.tree_liq.tag_configure("cancelada",   background="#b71c1c", foreground="#ffffff", font=("Segoe UI", 9))
+        self.tree_liq.tag_configure("cancelada_otro_dia", background="#880e4f", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
+        self.tree_liq.tag_configure("credito",     background="#e65100", foreground="#ffffff", font=("Segoe UI", 9))
+        self.tree_liq.tag_configure("credito_punteado", background="#0d47a1", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
+
+        # Scrollbars
+        scroll_liq_y = ttk.Scrollbar(tree_liq_container, orient=tk.VERTICAL, command=self.tree_liq.yview)
+        scroll_liq_x = ttk.Scrollbar(tree_liq_container, orient=tk.HORIZONTAL, command=self.tree_liq.xview)
+        self.tree_liq.configure(yscrollcommand=scroll_liq_y.set, xscrollcommand=scroll_liq_x.set)
+        
+        # Grid layout
+        self.tree_liq.grid(row=0, column=0, sticky="nsew")
+        scroll_liq_y.grid(row=0, column=1, sticky="ns")
+        scroll_liq_x.grid(row=1, column=0, sticky="ew")
+        
+        tree_liq_container.grid_rowconfigure(0, weight=1)
+        tree_liq_container.grid_columnconfigure(0, weight=1)
+        
+        # Bindings
+        self.tree_liq.bind("<Control-c>", lambda e: self._copiar_seleccion_tree(self.tree_liq))
+        self.tree_liq.bind("<Control-C>", lambda e: self._copiar_seleccion_tree(self.tree_liq))
+        self.tree_liq.bind("<Button-3>", lambda e: self._mostrar_menu_copiar(self.tree_liq, e))
+        self.tree_liq.bind("<<TreeviewSelect>>", self._on_select_venta_liq)
+        self.tree_liq.bind("<Button-1>", self._on_click_tree_liq)
+        
+        # Diccionario para guardar info de devoluciones por folio
+        self.devoluciones_detalle = {}
+
+    # ==================================================================
+    # PESTAÑA – LIQUIDACIÓN  (datos en tiempo real desde DataStore)
     # ==================================================================
     def _crear_tab_liquidacion(self):
         # ============================================================
@@ -4041,283 +4388,6 @@ ORDER BY V.FOLIO, DA.ID;
         ttk.Label(col_cancel, text="📅 Canceladas otro día:", foreground="#b71c1c").grid(row=3, column=0, sticky=tk.W)
         self.lbl_total_canceladas_otro_dia = ttk.Label(col_cancel, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#b71c1c")
         self.lbl_total_canceladas_otro_dia.grid(row=3, column=1, sticky=tk.E, padx=(10, 0))
-
-        # ============================================================
-        # TABLA DE VENTAS - Se empaqueta AL FINAL para ocupar el espacio restante
-        # ============================================================
-        frame_tabla = ttk.LabelFrame(self.tab_liquidacion, text="📊 VENTAS DEL DÍA", padding=(5, 5))
-        frame_tabla.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
-
-        # Contenedor para Treeview con scrollbars
-        tree_liq_container = ttk.Frame(frame_tabla)
-        tree_liq_container.pack(fill=tk.BOTH, expand=True)
-        
-        self.tree_liq = ttk.Treeview(
-            tree_liq_container,
-            columns=("credito", "folio", "cliente", "subtotal", "art_dev", "precio_dev", "cant_dev", "total_dev", "ajuste", "total_desp_aj", "repartidor", "estado"),
-            selectmode="extended", height=3
-        )
-        self.tree_liq.column("#0",           width=0, stretch=tk.NO)
-        self.tree_liq.column("credito",      anchor=tk.CENTER, width=40)
-        self.tree_liq.column("folio",        anchor=tk.CENTER, width=60)
-        self.tree_liq.column("cliente",      anchor=tk.W,      width=160)
-        self.tree_liq.column("subtotal",     anchor=tk.E,      width=85)
-        self.tree_liq.column("art_dev",      anchor=tk.W,      width=110)
-        self.tree_liq.column("precio_dev",   anchor=tk.E,      width=65)
-        self.tree_liq.column("cant_dev",     anchor=tk.CENTER, width=45)
-        self.tree_liq.column("total_dev",    anchor=tk.E,      width=70)
-        self.tree_liq.column("ajuste",       anchor=tk.E,      width=70)
-        self.tree_liq.column("total_desp_aj",anchor=tk.E,      width=95)
-        self.tree_liq.column("repartidor",   anchor=tk.CENTER, width=80)
-        self.tree_liq.column("estado",       anchor=tk.CENTER, width=75)
-
-        self.tree_liq.heading("credito",      text="💳")
-        self.tree_liq.heading("folio",        text="📋 Folio")
-        self.tree_liq.heading("cliente",      text="👤 Cliente")
-        self.tree_liq.heading("subtotal",     text="💵 Subtotal")
-        self.tree_liq.heading("art_dev",      text="↩️ Art.Dev")
-        self.tree_liq.heading("precio_dev",   text="💲 Precio")
-        self.tree_liq.heading("cant_dev",     text="📦 Cant")
-        self.tree_liq.heading("total_dev",    text="💸 TotalDev")
-        self.tree_liq.heading("ajuste",       text="📉 Ajuste")
-        self.tree_liq.heading("total_desp_aj",text="✅ TotalDespAj")
-        self.tree_liq.heading("repartidor",   text="🚚 Rep.")
-        self.tree_liq.heading("estado",       text="📊 Estado")
-
-        # Tags con colores para modo oscuro
-        # Colores por repartidor (tonos oscuros suaves)
-        self.tree_liq.tag_configure("rep_cristian",  background="#37474f", foreground="#80cbc4", font=("Segoe UI", 9))  # Gris azulado
-        self.tree_liq.tag_configure("rep_cajero",    background="#33691e", foreground="#c5e1a5", font=("Segoe UI", 9))  # Verde oliva
-        self.tree_liq.tag_configure("rep_david",     background="#4a148c", foreground="#ce93d8", font=("Segoe UI", 9))  # Morado profundo
-        self.tree_liq.tag_configure("rep_otro",      background="#004d40", foreground="#80cbc4", font=("Segoe UI", 9))  # Teal oscuro
-        # Estados especiales
-        self.tree_liq.tag_configure("sin_asignar", background="#4a4a4a", foreground="#ff8a80", font=("Segoe UI", 9))
-        self.tree_liq.tag_configure("cancelada",   background="#b71c1c", foreground="#ffffff", font=("Segoe UI", 9))
-        self.tree_liq.tag_configure("cancelada_otro_dia", background="#880e4f", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
-        self.tree_liq.tag_configure("credito",     background="#e65100", foreground="#ffffff", font=("Segoe UI", 9))
-        self.tree_liq.tag_configure("credito_punteado", background="#0d47a1", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
-
-        # Scrollbars
-        scroll_liq_y = ttk.Scrollbar(tree_liq_container, orient=tk.VERTICAL, command=self.tree_liq.yview)
-        scroll_liq_x = ttk.Scrollbar(tree_liq_container, orient=tk.HORIZONTAL, command=self.tree_liq.xview)
-        self.tree_liq.configure(yscrollcommand=scroll_liq_y.set, xscrollcommand=scroll_liq_x.set)
-        
-        # Grid layout
-        self.tree_liq.grid(row=0, column=0, sticky="nsew")
-        scroll_liq_y.grid(row=0, column=1, sticky="ns")
-        scroll_liq_x.grid(row=1, column=0, sticky="ew")
-        
-        tree_liq_container.grid_rowconfigure(0, weight=1)
-        tree_liq_container.grid_columnconfigure(0, weight=1)
-        
-        # Bindings para copiar
-        self.tree_liq.bind("<Control-c>", lambda e: self._copiar_seleccion_tree(self.tree_liq))
-        self.tree_liq.bind("<Control-C>", lambda e: self._copiar_seleccion_tree(self.tree_liq))
-        self.tree_liq.bind("<Button-3>", lambda e: self._mostrar_menu_copiar(self.tree_liq, e))
-        # Binding para mostrar detalle de devoluciones al seleccionar
-        self.tree_liq.bind("<<TreeviewSelect>>", self._on_select_venta_liq)
-        # Binding para toggle de crédito punteado al hacer click en columna crédito
-        self.tree_liq.bind("<Button-1>", self._on_click_tree_liq)
-        
-        # ============================================================
-        # PANEL DE ASIGNACIÓN DE REPARTIDOR (debajo de la tabla)
-        # ============================================================
-        frame_asignar_rep = ttk.LabelFrame(frame_tabla, text="🚚 ASIGNAR REPARTIDOR A FACTURA SELECCIONADA", padding=(8, 5))
-        frame_asignar_rep.pack(fill=tk.X, padx=0, pady=(5, 0))
-        
-        # Folio seleccionado
-        ttk.Label(frame_asignar_rep, text="Folio:").pack(side=tk.LEFT, padx=(0, 5))
-        self.lbl_folio_asignar = ttk.Label(frame_asignar_rep, text="—", font=("Segoe UI", 9, "bold"), foreground="#1565c0")
-        self.lbl_folio_asignar.pack(side=tk.LEFT, padx=(0, 15))
-        
-        # Cliente
-        ttk.Label(frame_asignar_rep, text="Cliente:").pack(side=tk.LEFT, padx=(0, 5))
-        self.lbl_cliente_asignar = ttk.Label(frame_asignar_rep, text="—", font=("Segoe UI", 9))
-        self.lbl_cliente_asignar.pack(side=tk.LEFT, padx=(0, 15))
-        
-        # Repartidor actual
-        ttk.Label(frame_asignar_rep, text="Rep. Actual:").pack(side=tk.LEFT, padx=(0, 5))
-        self.lbl_rep_actual = ttk.Label(frame_asignar_rep, text="—", font=("Segoe UI", 9), foreground="#e65100")
-        self.lbl_rep_actual.pack(side=tk.LEFT, padx=(0, 15))
-        
-        # Combo para nuevo repartidor
-        ttk.Label(frame_asignar_rep, text="Nuevo Rep.:").pack(side=tk.LEFT, padx=(0, 5))
-        self.combo_nuevo_rep_liq = ttk.Combobox(frame_asignar_rep, width=15, state="readonly")
-        self.combo_nuevo_rep_liq.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Botón guardar
-        ttk.Button(frame_asignar_rep, text="💾 Guardar Cambio", 
-                   command=self._guardar_cambio_repartidor_liq).pack(side=tk.LEFT, padx=5)
-        
-        # ============================================================
-        # PANEL DE PAGO PROVEEDORES Y PRÉSTAMOS (debajo de la tabla)
-        # ============================================================
-        frame_pagos_prestamos = ttk.Frame(frame_tabla)
-        frame_pagos_prestamos.pack(fill=tk.X, padx=0, pady=(5, 0))
-        
-        # --- PAGO A PROVEEDORES (izquierda) ---
-        frame_proveedores = ttk.LabelFrame(frame_pagos_prestamos, text="💼 PAGO A PROVEEDORES", padding=(5, 5))
-        frame_proveedores.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        
-        # Formulario para agregar pago
-        frame_form_prov = ttk.Frame(frame_proveedores)
-        frame_form_prov.pack(fill=tk.X, padx=5, pady=(0, 5))
-        
-        ttk.Label(frame_form_prov, text="Proveedor:").pack(side=tk.LEFT)
-        self.entry_proveedor = ttk.Entry(frame_form_prov, width=15)
-        self.entry_proveedor.pack(side=tk.LEFT, padx=(5, 10))
-        
-        ttk.Label(frame_form_prov, text="Concepto:").pack(side=tk.LEFT)
-        self.entry_concepto_prov = ttk.Entry(frame_form_prov, width=15)
-        self.entry_concepto_prov.pack(side=tk.LEFT, padx=(5, 10))
-        
-        ttk.Label(frame_form_prov, text="Monto:").pack(side=tk.LEFT)
-        self.entry_monto_prov = ttk.Entry(frame_form_prov, width=12)
-        self.entry_monto_prov.pack(side=tk.LEFT, padx=(5, 10))
-        
-        ttk.Button(frame_form_prov, text="➕ Agregar", width=10,
-                   command=self._agregar_pago_proveedor).pack(side=tk.LEFT, padx=5)
-        ttk.Button(frame_form_prov, text="🗑️ Eliminar", width=10,
-                   command=self._eliminar_pago_proveedor).pack(side=tk.LEFT)
-        
-        # Tabla de pagos a proveedores
-        tree_prov_container = ttk.Frame(frame_proveedores)
-        tree_prov_container.pack(fill=tk.BOTH, expand=True, padx=5)
-        
-        self.tree_pagos_prov = ttk.Treeview(
-            tree_prov_container,
-            columns=("id", "proveedor", "concepto", "monto"),
-            selectmode="browse", height=3
-        )
-        self.tree_pagos_prov.column("#0", width=0, stretch=tk.NO)
-        self.tree_pagos_prov.column("id", width=0, stretch=tk.NO)  # Oculta
-        self.tree_pagos_prov.column("proveedor", anchor=tk.W, width=120)
-        self.tree_pagos_prov.column("concepto", anchor=tk.W, width=150)
-        self.tree_pagos_prov.column("monto", anchor=tk.E, width=100)
-        
-        self.tree_pagos_prov.heading("proveedor", text="Proveedor")
-        self.tree_pagos_prov.heading("concepto", text="Concepto")
-        self.tree_pagos_prov.heading("monto", text="Monto")
-        
-        self.tree_pagos_prov.tag_configure("pago", background="#1a237e", foreground="#90caf9", font=("Segoe UI", 9))
-        
-        scroll_prov_y = ttk.Scrollbar(tree_prov_container, orient=tk.VERTICAL, command=self.tree_pagos_prov.yview)
-        self.tree_pagos_prov.configure(yscrollcommand=scroll_prov_y.set)
-        
-        self.tree_pagos_prov.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_prov_y.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # --- PRÉSTAMOS (derecha) ---
-        frame_prestamos = ttk.LabelFrame(frame_pagos_prestamos, text="💵 PRÉSTAMOS", padding=(5, 5))
-        frame_prestamos.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
-        
-        # Formulario para agregar préstamo
-        frame_form_prest = ttk.Frame(frame_prestamos)
-        frame_form_prest.pack(fill=tk.X, padx=5, pady=(0, 5))
-        
-        ttk.Label(frame_form_prest, text="Repartidor:").pack(side=tk.LEFT)
-        self.combo_rep_prestamo = ttk.Combobox(frame_form_prest, width=12, state="readonly")
-        self.combo_rep_prestamo.pack(side=tk.LEFT, padx=(5, 10))
-        
-        ttk.Label(frame_form_prest, text="Concepto:").pack(side=tk.LEFT)
-        self.entry_concepto_prest = ttk.Entry(frame_form_prest, width=15)
-        self.entry_concepto_prest.pack(side=tk.LEFT, padx=(5, 10))
-        
-        ttk.Label(frame_form_prest, text="Monto:").pack(side=tk.LEFT)
-        self.entry_monto_prest = ttk.Entry(frame_form_prest, width=12)
-        self.entry_monto_prest.pack(side=tk.LEFT, padx=(5, 10))
-        
-        ttk.Button(frame_form_prest, text="➕ Agregar", width=10,
-                   command=self._agregar_prestamo).pack(side=tk.LEFT, padx=5)
-        ttk.Button(frame_form_prest, text="🗑️ Eliminar", width=10,
-                   command=self._eliminar_prestamo).pack(side=tk.LEFT)
-        
-        # Tabla de préstamos
-        tree_prest_container = ttk.Frame(frame_prestamos)
-        tree_prest_container.pack(fill=tk.BOTH, expand=True, padx=5)
-        
-        self.tree_prestamos = ttk.Treeview(
-            tree_prest_container,
-            columns=("id", "repartidor", "concepto", "monto"),
-            selectmode="browse", height=3
-        )
-        self.tree_prestamos.column("#0", width=0, stretch=tk.NO)
-        self.tree_prestamos.column("id", width=0, stretch=tk.NO)  # Oculta
-        self.tree_prestamos.column("repartidor", anchor=tk.W, width=100)
-        self.tree_prestamos.column("concepto", anchor=tk.W, width=150)
-        self.tree_prestamos.column("monto", anchor=tk.E, width=100)
-        
-        self.tree_prestamos.heading("repartidor", text="Repartidor")
-        self.tree_prestamos.heading("concepto", text="Concepto")
-        self.tree_prestamos.heading("monto", text="Monto")
-        
-        self.tree_prestamos.tag_configure("prestamo", background="#004d40", foreground="#80cbc4", font=("Segoe UI", 9))
-        
-        scroll_prest_y = ttk.Scrollbar(tree_prest_container, orient=tk.VERTICAL, command=self.tree_prestamos.yview)
-        self.tree_prestamos.configure(yscrollcommand=scroll_prest_y.set)
-        
-        self.tree_prestamos.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_prest_y.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # ============================================================
-        # PANEL DE DEVOLUCIONES PARCIALES (debajo de la tabla)
-        # ============================================================
-        frame_dev = ttk.LabelFrame(frame_tabla, text="↩️ DETALLE DE DEVOLUCIONES PARCIALES", padding=(5, 5))
-        frame_dev.pack(fill=tk.X, padx=0, pady=(5, 0))
-        
-        # Info de la factura seleccionada
-        frame_dev_info = ttk.Frame(frame_dev)
-        frame_dev_info.pack(fill=tk.X, padx=5, pady=(0, 5))
-        
-        ttk.Label(frame_dev_info, text="Factura:").pack(side=tk.LEFT)
-        self.lbl_dev_folio = ttk.Label(frame_dev_info, text="—", font=("Segoe UI", 9, "bold"))
-        self.lbl_dev_folio.pack(side=tk.LEFT, padx=(5, 15))
-        
-        ttk.Label(frame_dev_info, text="Total Original:").pack(side=tk.LEFT)
-        self.lbl_dev_total_orig = ttk.Label(frame_dev_info, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#1565c0")
-        self.lbl_dev_total_orig.pack(side=tk.LEFT, padx=(5, 15))
-        
-        ttk.Label(frame_dev_info, text="Total Devuelto:").pack(side=tk.LEFT)
-        self.lbl_dev_total_dev = ttk.Label(frame_dev_info, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#c62828")
-        self.lbl_dev_total_dev.pack(side=tk.LEFT, padx=(5, 15))
-        
-        ttk.Label(frame_dev_info, text="Total Final:").pack(side=tk.LEFT)
-        self.lbl_dev_total_final = ttk.Label(frame_dev_info, text="$0.00", font=("Segoe UI", 9, "bold"), foreground="#2e7d32")
-        self.lbl_dev_total_final.pack(side=tk.LEFT, padx=5)
-        
-        # Tabla de artículos devueltos
-        tree_dev_container = ttk.Frame(frame_dev)
-        tree_dev_container.pack(fill=tk.X, padx=5)
-        
-        self.tree_dev_parciales = ttk.Treeview(
-            tree_dev_container,
-            columns=("codigo", "articulo", "cantidad", "valor_unit", "total_devuelto"),
-            selectmode="browse", height=4
-        )
-        self.tree_dev_parciales.column("#0", width=0, stretch=tk.NO)
-        self.tree_dev_parciales.column("codigo",        anchor=tk.CENTER, width=80)
-        self.tree_dev_parciales.column("articulo",      anchor=tk.W,      width=300)
-        self.tree_dev_parciales.column("cantidad",      anchor=tk.CENTER, width=100)
-        self.tree_dev_parciales.column("valor_unit",    anchor=tk.E,      width=120)
-        self.tree_dev_parciales.column("total_devuelto", anchor=tk.E,     width=120)
-        
-        self.tree_dev_parciales.heading("codigo",        text="Código")
-        self.tree_dev_parciales.heading("articulo",      text="Artículo Devuelto")
-        self.tree_dev_parciales.heading("cantidad",      text="Cantidad")
-        self.tree_dev_parciales.heading("valor_unit",    text="Valor Unit.")
-        self.tree_dev_parciales.heading("total_devuelto", text="Total Descontado")
-        
-        # Tags para la tabla de devoluciones (modo oscuro por defecto)
-        self.tree_dev_parciales.tag_configure("devolucion", background="#4a1f1f", foreground="#ff8a80", font=("Segoe UI", 9))
-        
-        scroll_dev_y = ttk.Scrollbar(tree_dev_container, orient=tk.VERTICAL, command=self.tree_dev_parciales.yview)
-        self.tree_dev_parciales.configure(yscrollcommand=scroll_dev_y.set)
-        
-        self.tree_dev_parciales.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        scroll_dev_y.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Diccionario para guardar info de devoluciones por folio
-        self.devoluciones_detalle = {}
 
     def _on_click_tree_liq(self, event):
         """Maneja el click en la tabla de liquidación para toggle de crédito punteado."""
@@ -5552,7 +5622,7 @@ ORDER BY V.FOLIO, DA.ID;
         frame_row1.pack(fill=tk.X)
         
         ttk.Label(frame_row1, text="Buscar:").pack(side=tk.LEFT)
-        self.buscar_var = tk.StringVar()
+        self.buscar_var = tk.StringVar(master=self.ventana)
         self.entry_buscar = ttk.Entry(frame_row1, textvariable=self.buscar_var, width=20)
         self.entry_buscar.pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
         ttk.Button(frame_row1, text="✕", width=3,
@@ -5563,14 +5633,14 @@ ORDER BY V.FOLIO, DA.ID;
         frame_row2.pack(fill=tk.X, pady=(4, 0))
         
         ttk.Label(frame_row2, text="Folio:").pack(side=tk.LEFT)
-        self.folio_var = tk.StringVar()
+        self.folio_var = tk.StringVar(master=self.ventana)
         self.folio_combo = ttk.Combobox(frame_row2, textvariable=self.folio_var,
                                         width=8, state="readonly")
         self.folio_combo.pack(side=tk.LEFT, padx=4)
         self.folio_combo.bind("<<ComboboxSelected>>", self._on_folio_combo_seleccionado)
         
         ttk.Label(frame_row2, text="Rep:").pack(side=tk.LEFT, padx=(8, 0))
-        self.filtro_rep_var = tk.StringVar(value="Todos")
+        self.filtro_rep_var = tk.StringVar(master=self.ventana, value="Todos")
         self.combo_filtro_rep = ttk.Combobox(frame_row2, textvariable=self.filtro_rep_var,
                                              width=12, state="readonly")
         self.combo_filtro_rep.pack(side=tk.LEFT, padx=4)
@@ -5676,37 +5746,37 @@ ORDER BY V.FOLIO, DA.ID;
 
         # Fila 0: Artículo
         ttk.Label(frame_agg, text="Artículo:").grid(row=0, column=0, sticky=tk.W)
-        self.articulo_desc_var = tk.StringVar()
+        self.articulo_desc_var = tk.StringVar(master=self.ventana)
         self.entry_articulo = ttk.Entry(frame_agg, textvariable=self.articulo_desc_var, state="readonly")
         self.entry_articulo.grid(row=0, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=2)
         
         # Fila 1: Cantidad + Precio Original
         ttk.Label(frame_agg, text="Cantidad:").grid(row=1, column=0, sticky=tk.W)
-        self.cantidad_ajuste_var = tk.StringVar(value="")
+        self.cantidad_ajuste_var = tk.StringVar(master=self.ventana, value="")
         self.entry_cantidad = ttk.Entry(frame_agg, textvariable=self.cantidad_ajuste_var, width=10, state="readonly")
         self.entry_cantidad.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
         
         ttk.Label(frame_agg, text="Precio:").grid(row=1, column=2, sticky=tk.W)
-        self.precio_original_var = tk.StringVar(value="")
+        self.precio_original_var = tk.StringVar(master=self.ventana, value="")
         self.entry_precio_orig = ttk.Entry(frame_agg, textvariable=self.precio_original_var, width=12, state="readonly")
         self.entry_precio_orig.grid(row=1, column=3, sticky=tk.W, padx=5, pady=2)
         
         # Fila 2: Nuevo Precio + Total Diferencia
         ttk.Label(frame_agg, text="Nuevo Precio:", foreground="#ffc107", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky=tk.W)
-        self.precio_nuevo_var = tk.StringVar(value="")
+        self.precio_nuevo_var = tk.StringVar(master=self.ventana, value="")
         self.entry_precio_nuevo = ttk.Entry(frame_agg, textvariable=self.precio_nuevo_var, width=12)
         self.entry_precio_nuevo.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
         self.entry_precio_nuevo.bind("<KeyRelease>", self._calcular_diferencia_ajuste)
         
         ttk.Label(frame_agg, text="Total Dif:", font=("Segoe UI", 9, "bold")).grid(row=2, column=2, sticky=tk.W)
-        self.monto_desc_var = tk.StringVar(value="$0")
+        self.monto_desc_var = tk.StringVar(master=self.ventana, value="$0")
         self.lbl_total_dif = ttk.Label(frame_agg, textvariable=self.monto_desc_var, 
                                         font=("Segoe UI", 11, "bold"), foreground="#ff5722")
         self.lbl_total_dif.grid(row=2, column=3, sticky=tk.W, padx=5, pady=2)
         
         # Fila 3: Observación
         ttk.Label(frame_agg, text="Observación:").grid(row=3, column=0, sticky=tk.W)
-        self.observacion_ajuste_var = tk.StringVar(value="")
+        self.observacion_ajuste_var = tk.StringVar(master=self.ventana, value="")
         self.entry_observacion = ttk.Entry(frame_agg, textvariable=self.observacion_ajuste_var)
         self.entry_observacion.grid(row=3, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=2)
         
@@ -6224,7 +6294,7 @@ ORDER BY V.FOLIO, DA.ID;
 
         # Fila 0: Tipo de registro (Combobox readonly con tipos fijos)
         ttk.Label(frame_entrada, text="Tipo:").grid(row=0, column=0, sticky=tk.W, pady=(0, 4))
-        self.gasto_tipo_var = tk.StringVar(value="GASTO")
+        self.gasto_tipo_var = tk.StringVar(master=self.ventana, value="GASTO")
         self.gasto_tipo_combo = ttk.Combobox(frame_entrada, textvariable=self.gasto_tipo_var,
                                               width=18, state="readonly")
         self.gasto_tipo_combo.grid(row=0, column=1, sticky=tk.W, padx=(4, 20), pady=(0, 4))
@@ -6234,20 +6304,20 @@ ORDER BY V.FOLIO, DA.ID;
 
         # Fila 1: Repartidor
         ttk.Label(frame_entrada, text="Repartidor:").grid(row=1, column=0, sticky=tk.W, pady=(0, 4))
-        self.gasto_rep_var = tk.StringVar()
+        self.gasto_rep_var = tk.StringVar(master=self.ventana)
         self.gasto_rep_combo = ttk.Combobox(frame_entrada, textvariable=self.gasto_rep_var,
                                             width=18, state="readonly")
         self.gasto_rep_combo.grid(row=1, column=1, sticky=tk.W, padx=(4, 20), pady=(0, 4))
 
         # Fila 2: Concepto (Entry libre)
         ttk.Label(frame_entrada, text="Concepto:").grid(row=2, column=0, sticky=tk.W, pady=(0, 4))
-        self.gasto_concepto_var = tk.StringVar()
+        self.gasto_concepto_var = tk.StringVar(master=self.ventana)
         ttk.Entry(frame_entrada, textvariable=self.gasto_concepto_var, width=50).grid(
             row=2, column=1, columnspan=4, sticky=tk.W, padx=(4, 0), pady=(0, 4))
 
         # Fila 3: Monto
         ttk.Label(frame_entrada, text="Monto:").grid(row=3, column=0, sticky=tk.W, pady=(0, 4))
-        self.gasto_monto_var = tk.StringVar(value="0.00")
+        self.gasto_monto_var = tk.StringVar(master=self.ventana, value="0.00")
         ttk.Entry(frame_entrada, textvariable=self.gasto_monto_var,
                   width=14, justify=tk.RIGHT).grid(row=3, column=1, sticky=tk.W, padx=(4, 0), pady=(0, 4))
         ttk.Label(frame_entrada, text="$").grid(row=3, column=2, sticky=tk.W, padx=(2, 16), pady=(0, 4))
@@ -6981,7 +7051,7 @@ ORDER BY V.FOLIO, DA.ID;
         frame_top.pack(fill=tk.X, padx=10, pady=(10, 4))
 
         ttk.Label(frame_top, text="Repartidor:").pack(side=tk.LEFT, padx=(0, 4))
-        self.dinero_rep_var = tk.StringVar()
+        self.dinero_rep_var = tk.StringVar(master=self.ventana)
         self.dinero_rep_combo = ttk.Combobox(frame_top, textvariable=self.dinero_rep_var,
                                              width=20, state="readonly")
         self.dinero_rep_combo.pack(side=tk.LEFT, padx=(0, 8))
@@ -7042,7 +7112,7 @@ ORDER BY V.FOLIO, DA.ID;
                 tk.Label(row, text=nombre, width=11, anchor=tk.E, 
                         bg=BG_CARD, fg=TEXT_PRIMARY, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
 
-                cant_var = tk.StringVar(value="0")
+                cant_var = tk.StringVar(master=self.ventana, value="0")
                 self.denom_vars[valor] = cant_var
 
                 tk.Label(row, text="×", bg=BG_CARD, fg=TEXT_PRIMARY).pack(side=tk.LEFT)
@@ -7053,7 +7123,7 @@ ORDER BY V.FOLIO, DA.ID;
                           font=("Segoe UI", 9))
                 entry.pack(side=tk.LEFT, padx=(4, 10))
 
-                sub_var = tk.StringVar(value="$0")
+                sub_var = tk.StringVar(master=self.ventana, value="$0")
                 self.denom_sub[valor] = sub_var
                 tk.Label(row, textvariable=sub_var, width=14,
                           anchor=tk.E, bg=BG_CARD, fg='#4caf50', 
@@ -7592,7 +7662,7 @@ ORDER BY V.FOLIO, DA.ID;
         
         # Combo con repartidores existentes o entrada libre
         reps = self.ds.get_repartidores()
-        nuevo_var = tk.StringVar(value=repartidor_actual)
+        nuevo_var = tk.StringVar(master=ventana, value=repartidor_actual)
         combo_nuevo = ttk.Combobox(frame_nuevo, textvariable=nuevo_var, values=reps, width=20)
         combo_nuevo.pack(side=tk.LEFT, padx=(10, 0))
         

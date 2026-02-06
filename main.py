@@ -26,6 +26,7 @@ from tkinter import ttk
 import sys
 import os
 import threading
+import time
 
 # Agregar el directorio actual al path para importaciones relativas
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -136,22 +137,22 @@ def main():
         # Mostrar splash screen
         splash = SplashScreen()
         
-        # Fase 1: Importar módulos base
-        splash.update_status("Cargando módulos del sistema...", 10)
+        # Fase 1: Importar módulos base (rápido)
+        splash.update_status("Importando módulos...", 15)
         
-        # Fase 2: Importar base de datos
-        splash.update_status("Conectando base de datos local...", 25)
+        # Fase 2: Importar base de datos local
+        splash.update_status("Iniciando base de datos local...", 30)
         try:
             import database_local
         except Exception as e:
             print(f"[WARN] database_local: {e}")
         
         # Fase 3: Importar módulo principal
-        splash.update_status("Cargando interfaz principal...", 45)
+        splash.update_status("Cargando componentes...", 50)
         from liquidador_repartidores import LiquidadorRepartidores
         
         # Fase 4: Crear ventana principal (oculta)
-        splash.update_status("Inicializando ventana...", 60)
+        splash.update_status("Creando interfaz...", 70)
         root = tk.Tk()
         root.withdraw()  # Ocultar mientras carga
         
@@ -163,16 +164,15 @@ def main():
             except Exception:
                 pass
         
-        # Fase 5: Inicializar la aplicación (aquí se cargan los datos)
-        splash.update_status("Cargando datos...", 75)
+        # Fase 5: Inicializar la aplicación
+        splash.update_status("Inicializando aplicación...", 85)
         app = LiquidadorRepartidores(root)
         
-        # Fase 6: Preparar interfaz
-        splash.update_status("Preparando interfaz...", 90)
-        root.update_idletasks()
-        
-        # Fase 7: Centrar ventana
+        # Fase 6: Finalizar
         splash.update_status("¡Listo!", 100)
+        
+        # Centrar ventana
+        root.update_idletasks()
         width = root.winfo_width()
         height = root.winfo_height()
         x = (root.winfo_screenwidth() // 2) - (width // 2)
@@ -181,9 +181,12 @@ def main():
         
         # Cerrar splash y mostrar ventana principal
         splash.close()
-        root.deiconify()  # Mostrar ventana principal
-        root.lift()  # Traer al frente
-        root.focus_force()  # Dar foco
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+        
+        # Cargar datos en segundo plano DESPUÉS de mostrar la ventana
+        root.after(50, app._cargar_datos_inicial)
         
         # Iniciar loop principal
         root.mainloop()
