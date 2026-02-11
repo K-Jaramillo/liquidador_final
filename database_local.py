@@ -110,7 +110,7 @@ import os
 import sys
 import json
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 # Ruta de la base de datos local
 # IMPORTANTE: Detectar si estamos en un .exe compilado o ejecutando como script
@@ -122,7 +122,7 @@ else:
     # Ejecutando como script Python normal
     BASE_DIR = os.path.dirname(__file__)
 
-DB_PATH = os.path.join(BASE_DIR, "liquiventas_data.db")
+DB_PATH = os.path.join(BASE_DIR, "liquidador_data.db")
 
 
 def get_connection():
@@ -324,20 +324,27 @@ def init_database():
     ''')
     # ══════════════════════════════════════════════════════════════════
     # TABLA: PRESTAMOS
-    # Guarda los préstamos realizados a repartidores
+    # Registra los préstamos de dinero a empleados/terceros
     # ══════════════════════════════════════════════════════════════════
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS prestamos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha DATE NOT NULL,
-            repartidor TEXT NOT NULL,
+            fecha TEXT NOT NULL,
+            beneficiario TEXT NOT NULL,
             concepto TEXT,
-            monto REAL NOT NULL DEFAULT 0,
-            estado TEXT DEFAULT 'pendiente' CHECK(estado IN ('pendiente', 'pagado', 'parcial')),
+            monto REAL DEFAULT 0,
+            abono REAL DEFAULT 0,
+            estado TEXT DEFAULT 'PENDIENTE',
+            responsable TEXT,
+            observaciones TEXT,
+            fecha_pagado TEXT,
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            UNIQUE(fecha, beneficiario, concepto)
         )
     ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_prestamos_fecha ON prestamos(fecha)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_prestamos_beneficiario ON prestamos(beneficiario)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_prestamos_estado ON prestamos(estado)')
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: HISTORIAL_LIQUIDACIONES
@@ -425,8 +432,6 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_devoluciones_parciales_fecha ON devoluciones_parciales(fecha)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_devoluciones_parciales_folio ON devoluciones_parciales(folio)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_pago_proveedores_fecha ON pago_proveedores(fecha)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_prestamos_fecha ON prestamos(fecha)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_prestamos_repartidor ON prestamos(repartidor)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conteos_sesion_fecha ON conteos_sesion(fecha)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conteos_sesion_repartidor ON conteos_sesion(repartidor)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conteos_sesion_detalle_sesion ON conteos_sesion_detalle(sesion_id)')
@@ -518,6 +523,12 @@ def init_database():
     try:
         cursor.execute('ALTER TABLE creditos_punteados ADD COLUMN estado TEXT DEFAULT "PENDIENTE"')
     except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_punteados ADD COLUMN fecha_pagado TEXT')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_punteados ADD COLUMN fecha_abono TEXT')
+    except: pass
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: NO_ENTREGADOS
@@ -530,14 +541,28 @@ def init_database():
             folio INTEGER NOT NULL,
             cliente TEXT,
             subtotal REAL DEFAULT 0,
+            abono REAL DEFAULT 0,
+            estado TEXT DEFAULT 'PENDIENTE',
             repartidor TEXT,
             observaciones TEXT,
+            fecha_devuelto TEXT,
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fecha, folio)
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_no_entregados_fecha ON no_entregados(fecha)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_no_entregados_folio ON no_entregados(folio)')
+    
+    # Agregar columnas si no existen (migración para no_entregados)
+    try:
+        cursor.execute('ALTER TABLE no_entregados ADD COLUMN abono REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE no_entregados ADD COLUMN estado TEXT DEFAULT "PENDIENTE"')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE no_entregados ADD COLUMN fecha_devuelto TEXT')
+    except: pass
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: CREDITOS_ELEVENTA
@@ -577,6 +602,29 @@ def init_database():
     try:
         cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN observaciones TEXT DEFAULT ""')
     except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN fecha_pagado TEXT')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE creditos_eleventa ADD COLUMN fecha_abono TEXT')
+    except: pass
+    
+    # Migración: llenar fecha_pagado para créditos ya pagados que no tienen fecha
+    try:
+        from datetime import date
+        hoy = date.today().isoformat()
+        cursor.execute('''
+            UPDATE creditos_eleventa 
+            SET fecha_pagado = COALESCE(DATE(fecha_modificacion), ?)
+            WHERE estado = 'PAGADO' AND (fecha_pagado IS NULL OR fecha_pagado = '')
+        ''', (hoy,))
+        cursor.execute('''
+            UPDATE creditos_punteados 
+            SET fecha_pagado = ?
+            WHERE estado = 'PAGADO' AND (fecha_pagado IS NULL OR fecha_pagado = '')
+        ''', (hoy,))
+    except Exception as e:
+        print(f"Migración fecha_pagado: {e}")
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: CORTE_CAJERO
@@ -619,24 +667,56 @@ def init_database():
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: CANCELACIONES_DETALLE
-    # Guarda el detalle de cada cancelación: folio, ticket_id, cajero que canceló
-    # Extraído de la tabla DEVOLUCIONES de Firebird (PDVDATA.FDB)
+    # Guarda el detalle de cada cancelación y devolución con información completa
+    # Extraído de la tabla DEVOLUCIONES y VENTATICKETS de Firebird (PDVDATA.FDB)
     # ══════════════════════════════════════════════════════════════════
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS cancelaciones_detalle (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             fecha DATE NOT NULL,
             folio INTEGER NOT NULL,
-            ticket_id INTEGER NOT NULL,
-            cajero_cancelo TEXT NOT NULL,
-            monto REAL DEFAULT 0,
-            fecha_cancelacion DATE,
+            cliente TEXT DEFAULT 'MOSTRADOR',
+            fecha_venta DATE,
+            fecha_cancel DATE,
+            total_original REAL DEFAULT 0,
+            despues_dev REAL DEFAULT 0,
+            cancelacion REAL DEFAULT 0,
+            bug_dup REAL DEFAULT 0,
+            tipo TEXT DEFAULT 'CANCELACIÓN',
+            ticket_id INTEGER DEFAULT 0,
+            cajero_cancelo TEXT DEFAULT '',
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fecha, folio)
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_cancelaciones_detalle_fecha ON cancelaciones_detalle(fecha)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_cancelaciones_detalle_folio ON cancelaciones_detalle(folio)')
+    
+    # Agregar columnas nuevas si no existen (para bases de datos existentes)
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN cliente TEXT DEFAULT "MOSTRADOR"')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN fecha_venta DATE')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN fecha_cancel DATE')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN total_original REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN despues_dev REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN cancelacion REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN bug_dup REAL DEFAULT 0')
+    except: pass
+    try:
+        cursor.execute('ALTER TABLE cancelaciones_detalle ADD COLUMN tipo TEXT DEFAULT "CANCELACIÓN"')
+    except: pass
     
     # ══════════════════════════════════════════════════════════════════
     # TABLA: TOTALES_CANCELACIONES_EFECTIVO
@@ -709,6 +789,27 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_fecha ON historial_abonos(fecha_abono)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_folio ON historial_abonos(folio)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_historial_abonos_origen ON historial_abonos(origen)')
+    
+    # ══════════════════════════════════════════════════════════════════
+    # TABLA: BUGS_ELEVENTA
+    # Registra bugs de duplicación detectados en el sistema Eleventa
+    # (cuando TURNOS tiene valores inflados vs CORTE_MOVIMIENTOS)
+    # ══════════════════════════════════════════════════════════════════
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bugs_eleventa (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            turno_id INTEGER NOT NULL,
+            tipo_bug TEXT NOT NULL,
+            descripcion TEXT,
+            monto_bug REAL DEFAULT 0,
+            detalle_json TEXT,
+            fecha_deteccion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(fecha, turno_id, tipo_bug)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bugs_eleventa_fecha ON bugs_eleventa(fecha)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bugs_eleventa_turno ON bugs_eleventa(turno_id)')
     
     # ══════════════════════════════════════════════════════════════════
     # MIGRACIONES: Agregar columnas observaciones si no existen
@@ -1617,6 +1718,15 @@ def guardar_devolucion_parcial(fecha: str, folio: int, devolucion_id: int,
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        
+        # Verificar si ya existe este devolucion_id
+        if devolucion_id:
+            cursor.execute('SELECT id FROM devoluciones_parciales WHERE devolucion_id = ?', (devolucion_id,))
+            existente = cursor.fetchone()
+            if existente:
+                conn.close()
+                return existente['id']  # Ya existe, retornar el ID existente
+        
         cursor.execute('''
             INSERT INTO devoluciones_parciales 
             (fecha, folio, devolucion_id, codigo_producto, descripcion_producto,
@@ -1689,6 +1799,116 @@ def obtener_total_devoluciones_parciales_fecha(fecha: str) -> float:
     return row['total'] if row else 0
 
 
+def obtener_dev_parciales_otro_dia(fecha_devolucion: str) -> Tuple[float, List[Dict]]:
+    """
+    Obtiene devoluciones parciales procesadas en fecha_devolucion pero de facturas de otros días.
+    
+    Args:
+        fecha_devolucion: Fecha en que se procesó la devolución (YYYY-MM-DD)
+        
+    Returns:
+        Tuple: (total_monto, lista_de_facturas)
+        donde lista_de_facturas = [{folio, fecha_factura, total_devuelto}, ...]
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    # Obtener folios de facturas de otros días con devoluciones en esta fecha
+    cursor.execute('''
+        SELECT folio, fecha as fecha_factura, SUM(dinero_devuelto) as total_devuelto
+        FROM devoluciones_parciales 
+        WHERE fecha_devolucion = ? AND fecha != ?
+        GROUP BY folio, fecha
+        ORDER BY folio
+    ''', (fecha_devolucion, fecha_devolucion))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    total = sum(row['total_devuelto'] for row in rows)
+    facturas = [
+        {
+            'folio': row['folio'],
+            'fecha_factura': row['fecha_factura'],
+            'total_devuelto': row['total_devuelto']
+        }
+        for row in rows
+    ]
+    return total, facturas
+
+
+def obtener_dev_parciales_no_registradas(fecha_venta: str) -> Tuple[float, List[Dict]]:
+    """
+    Obtiene devoluciones parciales de facturas vendidas en fecha_venta pero procesadas en otro día.
+    Estas son devoluciones que NO se reflejan en el corte del día de venta porque
+    se hicieron posteriormente.
+    
+    Args:
+        fecha_venta: Fecha de la venta original (YYYY-MM-DD)
+        
+    Returns:
+        Tuple: (total_monto, lista_de_facturas)
+        donde lista_de_facturas = [{folio, fecha_devolucion, total_devuelto}, ...]
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    # Obtener devoluciones de facturas de esta fecha que se procesaron en otro día
+    cursor.execute('''
+        SELECT folio, fecha_devolucion, SUM(dinero_devuelto) as total_devuelto
+        FROM devoluciones_parciales 
+        WHERE fecha = ? AND fecha_devolucion IS NOT NULL AND fecha_devolucion != ?
+        GROUP BY folio, fecha_devolucion
+        ORDER BY fecha_devolucion, folio
+    ''', (fecha_venta, fecha_venta))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    total = sum(row['total_devuelto'] for row in rows)
+    facturas = [
+        {
+            'folio': row['folio'],
+            'fecha_devolucion': row['fecha_devolucion'],
+            'total_devuelto': row['total_devuelto']
+        }
+        for row in rows
+    ]
+    return total, facturas
+
+
+def obtener_canceladas_otro_dia(fecha_cancelacion: str) -> Tuple[float, List[Dict]]:
+    """
+    Obtiene cancelaciones de facturas de otros días que se procesaron en fecha_cancelacion.
+    Estas son cancelaciones que afectan el corte de hoy pero son de ventas de otros días.
+    
+    Args:
+        fecha_cancelacion: Fecha en que se procesó la cancelación (YYYY-MM-DD)
+        
+    Returns:
+        Tuple: (total_monto, lista_de_facturas)
+        donde lista_de_facturas = [{folio, fecha_factura, monto}, ...]
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    # Obtener folios de facturas de otros días canceladas en esta fecha
+    cursor.execute('''
+        SELECT folio, fecha as fecha_factura, monto
+        FROM cancelaciones_detalle 
+        WHERE fecha_cancelacion = ? AND fecha != ?
+        ORDER BY folio
+    ''', (fecha_cancelacion, fecha_cancelacion))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    total = sum(row['monto'] for row in rows)
+    facturas = [
+        {
+            'folio': row['folio'],
+            'fecha_factura': row['fecha_factura'],
+            'monto': row['monto']
+        }
+        for row in rows
+    ]
+    return total, facturas
+
+
 def obtener_devoluciones_parciales_por_folio_fecha(fecha: str) -> Dict[int, float]:
     """Obtiene un diccionario con el total de devoluciones parciales por folio para una fecha."""
     conn = get_connection()
@@ -1746,6 +1966,21 @@ def limpiar_devoluciones_parciales_fecha(fecha: str) -> bool:
     except Exception as e:
         print(f"Error limpiando devoluciones: {e}")
         return False
+
+
+def obtener_todas_dev_parciales() -> List[Dict]:
+    """Obtiene todas las devoluciones parciales de la base de datos."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, fecha, folio, devolucion_id, codigo_producto, descripcion_producto,
+               cantidad_devuelta, valor_unitario, dinero_devuelto, fecha_devolucion, fecha_creacion
+        FROM devoluciones_parciales 
+        ORDER BY fecha_devolucion DESC, fecha DESC, folio
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1864,19 +2099,19 @@ def obtener_pago_proveedor_por_id(pago_id: int) -> Optional[Dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FUNCIONES PARA PRÉSTAMOS
+# FUNCIONES PARA PRÉSTAMOS (desde pestaña Gastos - usa beneficiario como repartidor)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def agregar_prestamo(fecha: str, repartidor: str, concepto: str, monto: float,
-                     observaciones: str = '', estado: str = 'pendiente') -> int:
+                     observaciones: str = '', estado: str = 'PENDIENTE') -> int:
     """Agrega un nuevo préstamo. Retorna el ID del préstamo creado."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO prestamos (fecha, repartidor, concepto, monto, estado, observaciones)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (fecha, repartidor, concepto, monto, estado, observaciones))
+            INSERT INTO prestamos (fecha, beneficiario, concepto, monto, estado, observaciones, responsable)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (fecha, repartidor, concepto, monto, estado, observaciones, repartidor))
         conn.commit()
         prestamo_id = cursor.lastrowid
         conn.close()
@@ -1887,11 +2122,13 @@ def agregar_prestamo(fecha: str, repartidor: str, concepto: str, monto: float,
 
 
 def obtener_prestamos_fecha(fecha: str) -> List[Dict]:
-    """Obtiene todos los préstamos de una fecha."""
+    """Obtiene todos los préstamos de una fecha (para pestaña Gastos)."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT * FROM prestamos WHERE fecha = ?
+        SELECT id, fecha, beneficiario as repartidor, concepto, monto, abono, estado, 
+               responsable, observaciones, fecha_pagado, fecha_creacion
+        FROM prestamos WHERE fecha = ?
         ORDER BY fecha_creacion
     ''', (fecha,))
     rows = cursor.fetchall()
@@ -1900,12 +2137,14 @@ def obtener_prestamos_fecha(fecha: str) -> List[Dict]:
 
 
 def obtener_prestamos_repartidor(fecha: str, repartidor: str) -> List[Dict]:
-    """Obtiene los préstamos de un repartidor en una fecha."""
+    """Obtiene los préstamos de un repartidor/beneficiario en una fecha."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT * FROM prestamos 
-        WHERE fecha = ? AND repartidor = ?
+        SELECT id, fecha, beneficiario as repartidor, concepto, monto, abono, estado, 
+               responsable, observaciones, fecha_pagado, fecha_creacion
+        FROM prestamos 
+        WHERE fecha = ? AND beneficiario = ?
         ORDER BY fecha_creacion
     ''', (fecha, repartidor))
     rows = cursor.fetchall()
@@ -1921,7 +2160,7 @@ def obtener_total_prestamos_fecha(fecha: str, repartidor: str = '') -> float:
         cursor.execute('''
             SELECT COALESCE(SUM(monto), 0) as total
             FROM prestamos 
-            WHERE fecha = ? AND repartidor = ?
+            WHERE fecha = ? AND beneficiario = ?
         ''', (fecha, repartidor))
     else:
         cursor.execute('''
@@ -1955,7 +2194,7 @@ def actualizar_prestamo(prestamo_id: int, repartidor: str, concepto: str, monto:
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE prestamos 
-            SET repartidor = ?, concepto = ?, monto = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+            SET beneficiario = ?, concepto = ?, monto = ?, observaciones = ?
             WHERE id = ?
         ''', (repartidor, concepto, monto, observaciones, prestamo_id))
         conn.commit()
@@ -2366,6 +2605,365 @@ def obtener_total_no_entregados_por_folios(fecha: str, folios: list) -> float:
     return total or 0.0
 
 
+def actualizar_abono_no_entregado(fecha: str, folio: int, nuevo_abono: float) -> dict:
+    """Actualiza el abono de un no entregado y cambia estado si saldo=0."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Obtener datos actuales
+        cursor.execute('''
+            SELECT cliente, subtotal, abono, estado, observaciones 
+            FROM no_entregados 
+            WHERE fecha = ? AND folio = ?
+        ''', (fecha, folio))
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            return {'success': False, 'error': 'No entregado no encontrado'}
+        
+        cliente, subtotal, abono_anterior, estado_anterior, observaciones_actuales = row
+        valor = round(subtotal or 0)
+        abono_anterior = round(abono_anterior or 0)
+        estado_anterior = estado_anterior or 'PENDIENTE'
+        observaciones_actuales = observaciones_actuales or ''
+        
+        # Redondear nuevo_abono
+        nuevo_abono = round(nuevo_abono)
+        
+        # Calcular nuevo saldo
+        nuevo_saldo = valor - nuevo_abono
+        
+        # Determinar nuevo estado y fecha
+        fecha_devuelto = None
+        from datetime import date
+        hoy = date.today().isoformat()
+        if nuevo_saldo <= 0:
+            nuevo_estado = 'PAGADO'
+            fecha_devuelto = hoy
+        else:
+            nuevo_estado = estado_anterior if estado_anterior != 'PAGADO' else 'PENDIENTE'
+        
+        # Registrar abono en observaciones si hay diferencia
+        monto_abonado = nuevo_abono - abono_anterior
+        if monto_abonado > 0:
+            nueva_obs = f"{hoy}: Abono ${monto_abonado:,.0f}"
+            if observaciones_actuales:
+                observaciones_actuales = f"{observaciones_actuales} | {nueva_obs}"
+            else:
+                observaciones_actuales = nueva_obs
+        
+        # Actualizar registro
+        if fecha_devuelto:
+            cursor.execute('''
+                UPDATE no_entregados 
+                SET abono = ?, estado = ?, fecha_devuelto = ?, observaciones = ?
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, fecha_devuelto, observaciones_actuales, fecha, folio))
+        else:
+            cursor.execute('''
+                UPDATE no_entregados 
+                SET abono = ?, estado = ?, fecha_devuelto = NULL, observaciones = ?
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, observaciones_actuales, fecha, folio))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            'success': True,
+            'valor': valor,
+            'abono_anterior': abono_anterior,
+            'nuevo_abono': nuevo_abono,
+            'saldo_anterior': valor - abono_anterior,
+            'nuevo_saldo': nuevo_saldo,
+            'estado_anterior': estado_anterior,
+            'nuevo_estado': nuevo_estado,
+            'cambio_estado': estado_anterior != nuevo_estado
+        }
+    except Exception as e:
+        print(f"Error actualizando abono no entregado: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def actualizar_estado_no_entregado(fecha: str, folio: int, estado: str) -> bool:
+    """Actualiza el estado de un no entregado (PENDIENTE/PAGADO/CANCELADA)."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Si cambia a PAGADO, poner fecha
+        fecha_devuelto = None
+        if estado == 'PAGADO':
+            from datetime import date
+            fecha_devuelto = date.today().isoformat()
+        
+        cursor.execute('''
+            UPDATE no_entregados 
+            SET estado = ?, fecha_devuelto = ?
+            WHERE fecha = ? AND folio = ?
+        ''', (estado, fecha_devuelto, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando estado no entregado: {e}")
+        return False
+
+
+def actualizar_repartidor_no_entregado(fecha: str, folio: int, repartidor: str) -> bool:
+    """Actualiza el repartidor de un no entregado."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE no_entregados 
+            SET repartidor = ?
+            WHERE fecha = ? AND folio = ?
+        ''', (repartidor, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando repartidor no entregado: {e}")
+        return False
+
+
+def actualizar_observaciones_no_entregado(fecha: str, folio: int, observaciones: str) -> bool:
+    """Actualiza las observaciones de un no entregado."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE no_entregados 
+            SET observaciones = ?
+            WHERE fecha = ? AND folio = ?
+        ''', (observaciones, fecha, folio))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando observaciones no entregado: {e}")
+        return False
+
+
+def obtener_no_entregado(fecha: str, folio: int) -> dict:
+    """Obtiene un no entregado específico."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM no_entregados WHERE fecha = ? AND folio = ?', (fecha, folio))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA PRÉSTAMOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def guardar_prestamo(fecha: str, beneficiario: str, concepto: str, monto: float,
+                     responsable: str = '', observaciones: str = '') -> bool:
+    """Guarda un nuevo préstamo."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO prestamos (fecha, beneficiario, concepto, monto, responsable, observaciones)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fecha, beneficiario, concepto) DO UPDATE SET
+                monto = excluded.monto,
+                responsable = excluded.responsable,
+                observaciones = excluded.observaciones
+        ''', (fecha, beneficiario, concepto, monto, responsable, observaciones))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error guardando préstamo: {e}")
+        return False
+
+
+def obtener_todos_prestamos() -> List[Dict]:
+    """Obtiene todos los préstamos de todas las fechas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM prestamos
+        ORDER BY fecha DESC, beneficiario, concepto
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def obtener_total_prestamos_pendientes() -> float:
+    """Obtiene el total de préstamos pendientes (sin pagar)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COALESCE(SUM(monto - COALESCE(abono, 0)), 0) 
+        FROM prestamos 
+        WHERE estado = 'PENDIENTE'
+    ''')
+    total = cursor.fetchone()[0]
+    conn.close()
+    return total or 0.0
+
+
+def actualizar_abono_prestamo(id_prestamo: int, nuevo_abono: float) -> dict:
+    """Actualiza el abono de un préstamo y cambia estado si saldo=0."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Obtener datos actuales
+        cursor.execute('''
+            SELECT beneficiario, concepto, monto, abono, estado, observaciones 
+            FROM prestamos 
+            WHERE id = ?
+        ''', (id_prestamo,))
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            return {'success': False, 'error': 'Préstamo no encontrado'}
+        
+        beneficiario, concepto, monto, abono_anterior, estado_anterior, observaciones_actuales = row
+        monto = round(monto or 0)
+        abono_anterior = round(abono_anterior or 0)
+        estado_anterior = estado_anterior or 'PENDIENTE'
+        observaciones_actuales = observaciones_actuales or ''
+        
+        # Redondear nuevo_abono
+        nuevo_abono = round(nuevo_abono)
+        
+        # Calcular nuevo saldo
+        nuevo_saldo = monto - nuevo_abono
+        
+        # Determinar nuevo estado y fecha
+        fecha_pagado = None
+        from datetime import date
+        hoy = date.today().isoformat()
+        if nuevo_saldo <= 0:
+            nuevo_estado = 'PAGADO'
+            fecha_pagado = hoy
+        else:
+            nuevo_estado = estado_anterior if estado_anterior != 'PAGADO' else 'PENDIENTE'
+        
+        # Registrar abono en observaciones si hay diferencia
+        monto_abonado = nuevo_abono - abono_anterior
+        if monto_abonado > 0:
+            nueva_obs = f"{hoy}: Abono ${monto_abonado:,.0f}"
+            if observaciones_actuales:
+                observaciones_actuales = f"{observaciones_actuales} | {nueva_obs}"
+            else:
+                observaciones_actuales = nueva_obs
+        
+        # Actualizar registro
+        if fecha_pagado:
+            cursor.execute('''
+                UPDATE prestamos 
+                SET abono = ?, estado = ?, fecha_pagado = ?, observaciones = ?
+                WHERE id = ?
+            ''', (nuevo_abono, nuevo_estado, fecha_pagado, observaciones_actuales, id_prestamo))
+        else:
+            cursor.execute('''
+                UPDATE prestamos 
+                SET abono = ?, estado = ?, fecha_pagado = NULL, observaciones = ?
+                WHERE id = ?
+            ''', (nuevo_abono, nuevo_estado, observaciones_actuales, id_prestamo))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            'success': True,
+            'monto': monto,
+            'abono_anterior': abono_anterior,
+            'nuevo_abono': nuevo_abono,
+            'saldo_anterior': monto - abono_anterior,
+            'nuevo_saldo': nuevo_saldo,
+            'estado_anterior': estado_anterior,
+            'nuevo_estado': nuevo_estado,
+            'cambio_estado': estado_anterior != nuevo_estado
+        }
+    except Exception as e:
+        print(f"Error actualizando abono préstamo: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def actualizar_estado_prestamo(id_prestamo: int, estado: str) -> bool:
+    """Actualiza el estado de un préstamo (PENDIENTE/PAGADO/CANCELADA)."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Si cambia a PAGADO, poner fecha
+        fecha_pagado = None
+        if estado == 'PAGADO':
+            from datetime import date
+            fecha_pagado = date.today().isoformat()
+        
+        cursor.execute('''
+            UPDATE prestamos 
+            SET estado = ?, fecha_pagado = ?
+            WHERE id = ?
+        ''', (estado, fecha_pagado, id_prestamo))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando estado préstamo: {e}")
+        return False
+
+
+def actualizar_responsable_prestamo(id_prestamo: int, responsable: str) -> bool:
+    """Actualiza el responsable de un préstamo."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE prestamos 
+            SET responsable = ?
+            WHERE id = ?
+        ''', (responsable, id_prestamo))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando responsable préstamo: {e}")
+        return False
+
+
+def actualizar_observaciones_prestamo(id_prestamo: int, observaciones: str) -> bool:
+    """Actualiza las observaciones de un préstamo."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE prestamos 
+            SET observaciones = ?
+            WHERE id = ?
+        ''', (observaciones, id_prestamo))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error actualizando observaciones préstamo: {e}")
+        return False
+
+
+def obtener_prestamo(id_prestamo: int) -> dict:
+    """Obtiene un préstamo específico por ID."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM prestamos WHERE id = ?', (id_prestamo,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FUNCIONES PARA CRÉDITOS ELEVENTA (Cache de Firebird)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2458,7 +3056,7 @@ def obtener_todos_creditos_eleventa() -> List[Dict]:
     cursor = conn.cursor()
     cursor.execute('''
         SELECT id, fecha, folio, ticket_id, cliente, subtotal, total_credito, repartidor,
-               abono, estado, observaciones, fecha_creacion, fecha_modificacion
+               abono, estado, observaciones, fecha_creacion, fecha_modificacion, fecha_pagado
         FROM creditos_eleventa
         ORDER BY fecha DESC, folio
     ''')
@@ -2499,6 +3097,81 @@ def eliminar_creditos_eleventa_fecha(fecha: str) -> bool:
     except Exception as e:
         print(f"Error eliminando créditos Eleventa: {e}")
         return False
+
+
+def obtener_total_creditos_cobrados_fecha(fecha: str) -> dict:
+    """
+    Obtiene el total de créditos cobrados (abonos y pagos completos) en una fecha específica.
+    Usa la tabla historial_abonos que registra cada abono individual.
+    
+    Returns:
+        dict con:
+            - total_abonos: suma de abonos parciales hechos en la fecha (saldo > 0)
+            - total_pagados: suma de pagos completos hechos en la fecha (saldo = 0)
+            - total_cobrado: total_abonos + total_pagados
+            - detalle: lista de créditos cobrados ese día
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        detalle = []
+        total_abonos = 0.0
+        total_pagados = 0.0
+        
+        # Buscar en historial_abonos - todos los abonos hechos en esa fecha
+        cursor.execute('''
+            SELECT folio, origen, cliente, valor_credito, monto_abonado, saldo_nuevo, estado_nuevo
+            FROM historial_abonos 
+            WHERE fecha_abono = ? AND monto_abonado > 0
+        ''', (fecha,))
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            folio, origen, cliente, valor_credito, monto_abonado, saldo_nuevo, estado_nuevo = row
+            monto_abonado = float(monto_abonado or 0)
+            saldo_nuevo = float(saldo_nuevo or 0)
+            valor_credito = float(valor_credito or 0)
+            
+            if saldo_nuevo <= 0 and estado_nuevo == 'PAGADO':
+                # Pago completo en esa fecha
+                total_pagados += monto_abonado
+                detalle.append({
+                    'origen': origen,
+                    'folio': folio,
+                    'cliente': cliente,
+                    'monto': monto_abonado,
+                    'tipo': 'PAGO_COMPLETO',
+                    'valor_credito': valor_credito
+                })
+            else:
+                # Abono parcial en esa fecha
+                total_abonos += monto_abonado
+                detalle.append({
+                    'origen': origen,
+                    'folio': folio,
+                    'cliente': cliente,
+                    'monto': monto_abonado,
+                    'tipo': 'ABONO',
+                    'valor_credito': valor_credito
+                })
+        
+        conn.close()
+        
+        return {
+            'total_abonos': total_abonos,
+            'total_pagados': total_pagados,
+            'total_cobrado': total_abonos + total_pagados,
+            'detalle': detalle
+        }
+    except Exception as e:
+        print(f"Error obteniendo total créditos cobrados: {e}")
+        return {
+            'total_abonos': 0.0,
+            'total_pagados': 0.0,
+            'total_cobrado': 0.0,
+            'detalle': []
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2567,9 +3240,9 @@ def actualizar_abono_credito_punteado(fecha: str, folio: int, nuevo_abono: float
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Obtener datos actuales del crédito
+        # Obtener datos actuales del crédito (incluyendo observaciones)
         cursor.execute('''
-            SELECT cliente, subtotal, valor_credito, abono, estado 
+            SELECT cliente, subtotal, valor_credito, abono, estado, observaciones 
             FROM creditos_punteados 
             WHERE fecha = ? AND folio = ?
         ''', (fecha, folio))
@@ -2579,33 +3252,67 @@ def actualizar_abono_credito_punteado(fecha: str, folio: int, nuevo_abono: float
             conn.close()
             return {'success': False, 'error': 'Crédito no encontrado'}
         
-        cliente, subtotal, valor_credito_db, abono_anterior, estado_anterior = row
-        valor_credito = valor_credito_db or subtotal or 0
-        abono_anterior = abono_anterior or 0
+        cliente, subtotal, valor_credito_db, abono_anterior, estado_anterior, observaciones_actuales = row
+        # Redondear valor_credito para evitar problemas con decimales
+        valor_credito = round(valor_credito_db or subtotal or 0)
+        abono_anterior = round(abono_anterior or 0)
         estado_anterior = estado_anterior or 'PENDIENTE'
+        observaciones_actuales = observaciones_actuales or ''
         
-        # Calcular nuevo saldo
+        # Redondear nuevo_abono
+        nuevo_abono = round(nuevo_abono)
+        
+        # Calcular nuevo saldo (sin decimales)
         nuevo_saldo = valor_credito - nuevo_abono
         
-        # Determinar nuevo estado
+        # Determinar nuevo estado y fecha de pago
+        fecha_pagado = None
+        from datetime import date
+        hoy = date.today().isoformat()
         if nuevo_saldo <= 0:
             nuevo_estado = 'PAGADO'
+            fecha_pagado = hoy
         else:
             nuevo_estado = estado_anterior if estado_anterior != 'PAGADO' else 'PENDIENTE'
         
-        # Actualizar crédito
-        cursor.execute('''
-            UPDATE creditos_punteados 
-            SET abono = ?, estado = ?
-            WHERE fecha = ? AND folio = ?
-        ''', (nuevo_abono, nuevo_estado, fecha, folio))
+        # Registrar abono en observaciones si hay diferencia
+        monto_abonado = nuevo_abono - abono_anterior
+        fecha_abono = None
+        if monto_abonado > 0:
+            nueva_obs = f"{hoy}: Abono ${monto_abonado:,.0f}"
+            if observaciones_actuales:
+                observaciones_actuales = f"{observaciones_actuales} | {nueva_obs}"
+            else:
+                observaciones_actuales = nueva_obs
+            # Guardar la fecha del abono
+            fecha_abono = hoy
+        
+        # Actualizar crédito (incluir fecha_pagado, fecha_abono y observaciones)
+        if fecha_pagado:
+            cursor.execute('''
+                UPDATE creditos_punteados 
+                SET abono = ?, estado = ?, fecha_pagado = ?, fecha_abono = ?, observaciones = ?
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, fecha_pagado, fecha_abono or hoy, observaciones_actuales, fecha, folio))
+        elif fecha_abono:
+            cursor.execute('''
+                UPDATE creditos_punteados 
+                SET abono = ?, estado = ?, fecha_pagado = NULL, fecha_abono = ?, observaciones = ?
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, fecha_abono, observaciones_actuales, fecha, folio))
+        else:
+            cursor.execute('''
+                UPDATE creditos_punteados 
+                SET abono = ?, estado = ?, fecha_pagado = NULL, observaciones = ?
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, observaciones_actuales, fecha, folio))
         conn.commit()
         conn.close()
         
         # Registrar en historial
-        from datetime import date
+        from datetime import date as date_class
         registrar_historial_abono(
-            fecha_abono=date.today().isoformat(),
+            fecha_abono=date_class.today().isoformat(),
             folio=folio,
             origen='PUNTEADO',
             cliente=cliente or '',
@@ -2634,7 +3341,7 @@ def actualizar_abono_credito_punteado(fecha: str, folio: int, nuevo_abono: float
 
 
 def actualizar_estado_credito_punteado(fecha: str, folio: int, estado: str) -> bool:
-    """Actualiza el estado de un crédito punteado (PAGADO/PENDIENTE/CANCELADO)."""
+    """Actualiza el estado de un crédito punteado (PAGADO/PENDIENTE/CANCELADA)."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -2659,9 +3366,9 @@ def actualizar_abono_credito_eleventa(fecha: str, folio: int, nuevo_abono: float
         
         print(f"[DEBUG] Buscando crédito Eleventa: fecha={fecha}, folio={folio}")
         
-        # Obtener datos actuales del crédito
+        # Obtener datos actuales del crédito (incluyendo observaciones)
         cursor.execute('''
-            SELECT cliente, subtotal, total_credito, abono, estado 
+            SELECT cliente, subtotal, total_credito, abono, estado, observaciones 
             FROM creditos_eleventa 
             WHERE fecha = ? AND folio = ?
         ''', (fecha, folio))
@@ -2675,28 +3382,62 @@ def actualizar_abono_credito_eleventa(fecha: str, folio: int, nuevo_abono: float
             conn.close()
             return {'success': False, 'error': f'Crédito no encontrado para fecha={fecha}, folio={folio}'}
         
-        cliente, subtotal, total_credito, abono_anterior, estado_anterior = row
-        valor_credito = total_credito or subtotal or 0
-        abono_anterior = abono_anterior or 0
+        cliente, subtotal, total_credito, abono_anterior, estado_anterior, observaciones_actuales = row
+        # Redondear valor_credito para evitar problemas con decimales
+        valor_credito = round(total_credito or subtotal or 0)
+        abono_anterior = round(abono_anterior or 0)
         estado_anterior = estado_anterior or 'PENDIENTE'
+        observaciones_actuales = observaciones_actuales or ''
         
         print(f"[DEBUG] Datos actuales: valor_credito={valor_credito}, abono_anterior={abono_anterior}, estado={estado_anterior}")
         
-        # Calcular nuevo saldo
+        # Redondear nuevo_abono
+        nuevo_abono = round(nuevo_abono)
+        
+        # Calcular nuevo saldo (sin decimales)
         nuevo_saldo = valor_credito - nuevo_abono
         
-        # Determinar nuevo estado
+        # Determinar nuevo estado y fecha de pago
+        fecha_pagado = None
+        from datetime import date
+        hoy = date.today().isoformat()
         if nuevo_saldo <= 0:
             nuevo_estado = 'PAGADO'
+            fecha_pagado = hoy
         else:
             nuevo_estado = estado_anterior if estado_anterior != 'PAGADO' else 'PENDIENTE'
         
-        # Actualizar crédito
-        cursor.execute('''
-            UPDATE creditos_eleventa 
-            SET abono = ?, estado = ?, fecha_modificacion = CURRENT_TIMESTAMP
-            WHERE fecha = ? AND folio = ?
-        ''', (nuevo_abono, nuevo_estado, fecha, folio))
+        # Registrar abono en observaciones si hay diferencia
+        monto_abonado = nuevo_abono - abono_anterior
+        fecha_abono = None
+        if monto_abonado > 0:
+            nueva_obs = f"{hoy}: Abono ${monto_abonado:,.0f}"
+            if observaciones_actuales:
+                observaciones_actuales = f"{observaciones_actuales} | {nueva_obs}"
+            else:
+                observaciones_actuales = nueva_obs
+            # Guardar la fecha del abono
+            fecha_abono = hoy
+        
+        # Actualizar crédito (incluir fecha_pagado, fecha_abono y observaciones)
+        if fecha_pagado:
+            cursor.execute('''
+                UPDATE creditos_eleventa 
+                SET abono = ?, estado = ?, fecha_pagado = ?, fecha_abono = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, fecha_pagado, fecha_abono or hoy, observaciones_actuales, fecha, folio))
+        elif fecha_abono:
+            cursor.execute('''
+                UPDATE creditos_eleventa 
+                SET abono = ?, estado = ?, fecha_pagado = NULL, fecha_abono = ?, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, fecha_abono, observaciones_actuales, fecha, folio))
+        else:
+            cursor.execute('''
+                UPDATE creditos_eleventa 
+                SET abono = ?, estado = ?, fecha_pagado = NULL, observaciones = ?, fecha_modificacion = CURRENT_TIMESTAMP
+                WHERE fecha = ? AND folio = ?
+            ''', (nuevo_abono, nuevo_estado, observaciones_actuales, fecha, folio))
         
         rows_affected = cursor.rowcount
         print(f"[DEBUG] UPDATE ejecutado. Filas afectadas: {rows_affected}")
@@ -2708,9 +3449,9 @@ def actualizar_abono_credito_eleventa(fecha: str, folio: int, nuevo_abono: float
             return {'success': False, 'error': 'No se actualizó ningún registro'}
         
         # Registrar en historial
-        from datetime import date
+        from datetime import date as date_class
         registrar_historial_abono(
-            fecha_abono=date.today().isoformat(),
+            fecha_abono=date_class.today().isoformat(),
             folio=folio,
             origen='ELEVENTA',
             cliente=cliente or '',
@@ -2739,7 +3480,7 @@ def actualizar_abono_credito_eleventa(fecha: str, folio: int, nuevo_abono: float
 
 
 def actualizar_estado_credito_eleventa(fecha: str, folio: int, estado: str) -> bool:
-    """Actualiza el estado de un crédito Eleventa (PAGADO/PENDIENTE/CANCELADO)."""
+    """Actualiza el estado de un crédito Eleventa (PAGADO/PENDIENTE/CANCELADA)."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -3637,6 +4378,180 @@ def archivar_anotacion(nota_id: int, archivar: bool = True) -> bool:
 def restaurar_anotacion(nota_id: int) -> bool:
     """Restaura una anotación eliminada."""
     return actualizar_anotacion(nota_id, eliminada=False)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES PARA BUGS_ELEVENTA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def guardar_bug_eleventa(fecha: str, turno_id: int, tipo_bug: str, descripcion: str, 
+                          monto_bug: float, detalle: list = None) -> bool:
+    """
+    Guarda un bug de Eleventa detectado.
+    
+    Args:
+        fecha: Fecha del bug (YYYY-MM-DD)
+        turno_id: ID del turno afectado
+        tipo_bug: 'turnos_mayor_corte' o 'duplicado_corte'
+        descripcion: Descripción del bug
+        monto_bug: Monto monetario del bug
+        detalle: Lista con detalle de artículos afectados
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        detalle_json = json.dumps(detalle) if detalle else None
+        
+        cursor.execute('''
+            INSERT INTO bugs_eleventa (fecha, turno_id, tipo_bug, descripcion, monto_bug, detalle_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fecha, turno_id, tipo_bug) DO UPDATE SET
+                descripcion = excluded.descripcion,
+                monto_bug = excluded.monto_bug,
+                detalle_json = excluded.detalle_json,
+                fecha_deteccion = CURRENT_TIMESTAMP
+        ''', (fecha, turno_id, tipo_bug, descripcion, monto_bug, detalle_json))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error guardando bug Eleventa: {e}")
+        return False
+
+
+def guardar_bugs_eleventa_lote(fecha: str, bugs: list) -> bool:
+    """
+    Guarda múltiples bugs de Eleventa detectados en una fecha.
+    Primero elimina los bugs previos de esa fecha y luego inserta los nuevos.
+    
+    Args:
+        fecha: Fecha del bug (YYYY-MM-DD)
+        bugs: Lista de dicts con: turno_id, tipo_bug, descripcion, monto_bug, detalle
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Eliminar bugs previos de esta fecha
+        cursor.execute('DELETE FROM bugs_eleventa WHERE fecha = ?', (fecha,))
+        
+        # Insertar nuevos bugs
+        for bug in bugs:
+            detalle_json = json.dumps(bug.get('detalle')) if bug.get('detalle') else None
+            cursor.execute('''
+                INSERT INTO bugs_eleventa (fecha, turno_id, tipo_bug, descripcion, monto_bug, detalle_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (fecha, bug['turno_id'], bug['tipo'], bug['descripcion'], 
+                  bug['monto_bug'], detalle_json))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error guardando bugs Eleventa lote: {e}")
+        return False
+
+
+def obtener_bugs_eleventa_fecha(fecha: str) -> list:
+    """
+    Obtiene todos los bugs de Eleventa para una fecha.
+    
+    Returns:
+        Lista de dicts con: id, fecha, turno_id, tipo_bug, descripcion, monto_bug, detalle
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, fecha, turno_id, tipo_bug, descripcion, monto_bug, detalle_json, fecha_deteccion
+            FROM bugs_eleventa
+            WHERE fecha = ?
+            ORDER BY turno_id, tipo_bug
+        ''', (fecha,))
+        
+        bugs = []
+        for row in cursor.fetchall():
+            detalle = json.loads(row['detalle_json']) if row['detalle_json'] else []
+            bugs.append({
+                'id': row['id'],
+                'fecha': row['fecha'],
+                'turno_id': row['turno_id'],
+                'tipo_bug': row['tipo_bug'],
+                'descripcion': row['descripcion'],
+                'monto_bug': row['monto_bug'],
+                'detalle': detalle,
+                'fecha_deteccion': row['fecha_deteccion']
+            })
+        
+        conn.close()
+        return bugs
+    except Exception as e:
+        print(f"Error obteniendo bugs Eleventa: {e}")
+        return []
+
+
+def obtener_total_bugs_eleventa_fecha(fecha: str) -> float:
+    """
+    Obtiene el monto total de bugs de Eleventa para una fecha.
+    
+    Returns:
+        Monto total de bugs
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT COALESCE(SUM(monto_bug), 0) as total
+            FROM bugs_eleventa
+            WHERE fecha = ?
+        ''', (fecha,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        return float(row['total']) if row else 0.0
+    except Exception as e:
+        print(f"Error obteniendo total bugs Eleventa: {e}")
+        return 0.0
+
+
+def obtener_resumen_bugs_eleventa_fecha(fecha: str) -> dict:
+    """
+    Obtiene un resumen de bugs para mostrar en la UI.
+    
+    Returns:
+        Dict con: total, cantidad, descripcion_corta
+    """
+    bugs = obtener_bugs_eleventa_fecha(fecha)
+    
+    if not bugs:
+        return {
+            'total': 0.0,
+            'cantidad': 0,
+            'descripcion_corta': '',
+            'tiene_bugs': False
+        }
+    
+    total = sum(b['monto_bug'] for b in bugs)
+    
+    # Generar descripción corta
+    descripciones = []
+    for bug in bugs:
+        if bug['tipo_bug'] == 'turnos_mayor_corte':
+            descripciones.append(f"T{bug['turno_id']}+${bug['monto_bug']:,.0f}")
+        elif bug['tipo_bug'] == 'duplicado_corte':
+            descripciones.append(f"T{bug['turno_id']}DUP${bug['monto_bug']:,.0f}")
+    
+    return {
+        'total': total,
+        'cantidad': len(bugs),
+        'descripcion_corta': " | ".join(descripciones),
+        'tiene_bugs': True
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
